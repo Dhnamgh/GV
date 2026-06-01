@@ -1,0 +1,9 @@
+streamlit
+gspread
+google-auth
+pillow
+qrcode
+pandas
+altair
+streamlit-geolocation
+geopy
