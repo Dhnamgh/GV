@@ -1,4 +1,4 @@
-# app_gv_attendance.py
+# app_gv_attendance_monthly.py
 import os
 import io
 import re
@@ -30,18 +30,19 @@ except Exception:
 
 
 # ===================== CẤU HÌNH CHUNG =====================
-# App này dùng cho ĐIỂM DANH GIẢNG VIÊN.
-# Giảng viên quét QR và điểm danh, KHÔNG cần đăng nhập.
-# Người quản trị đăng nhập để tạo QR, xem dữ liệu, thống kê.
+# App điểm danh GIẢNG VIÊN.
+# Giảng viên KHÔNG cần đăng nhập.
+# Quản trị đăng nhập để tạo QR cố định theo cơ sở, tìm kiếm, thống kê, kiểm tra dữ liệu.
 MSGV_PREFIX = st.secrets.get("SESSION_PREFIX", "0607")
 SHEET_KEY = st.secrets["SHEET_KEY"]
-WORKSHEET_NAME = st.secrets.get("WORKSHEET_NAME", "D25C")
 VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+BASE_INFO_COLUMNS = ["MSGV", "Họ và tên", "Đơn vị", "Bộ môn"]
 
 LOCATIONS = {
     "Cơ sở 1 - Hồng Bàng": {
@@ -142,7 +143,7 @@ section[data-testid="stSidebar"] * {
 """, unsafe_allow_html=True)
 
 
-# ===================== TIỆN ÍCH =====================
+# ===================== NGÀY THÁNG =====================
 def now_vn():
     return datetime.datetime.now(VN_TZ)
 
@@ -155,26 +156,38 @@ def today_header():
     return today_date().strftime("%d/%m/%Y")
 
 
-def token_today():
-    return today_date().strftime("%Y%m%d")
+def month_sheet_name(d=None):
+    if d is None:
+        d = today_date()
+    return d.strftime("%B-%Y")
+
+
+def previous_month_sheet_name(d=None):
+    if d is None:
+        d = today_date()
+    first_day = d.replace(day=1)
+    prev_day = first_day - datetime.timedelta(days=1)
+    return month_sheet_name(prev_day)
 
 
 def date_header(d: datetime.date) -> str:
     return d.strftime("%d/%m/%Y")
 
 
-def current_month_working_day_headers():
-    today = today_date()
-    year, month = today.year, today.month
+def current_month_working_day_headers(d=None):
+    if d is None:
+        d = today_date()
+    year, month = d.year, d.month
     last_day = monthrange(year, month)[1]
     headers = []
     for day in range(1, last_day + 1):
-        d = datetime.date(year, month, day)
-        if d.weekday() != 6:  # 6 = Chủ nhật
-            headers.append(date_header(d))
+        cur = datetime.date(year, month, day)
+        if cur.weekday() != 6:  # bỏ Chủ nhật
+            headers.append(date_header(cur))
     return headers
 
 
+# ===================== TIỆN ÍCH =====================
 def get_query_params():
     if hasattr(st, "query_params"):
         return dict(st.query_params)
@@ -220,10 +233,6 @@ def get_base_url():
     )
 
 
-def qr_token_valid(token: str) -> bool:
-    return str(token or "") == token_today()
-
-
 def attendance_value(time_str: str, campus_name: str) -> str:
     return f"{time_str} | {campus_name}"
 
@@ -236,6 +245,10 @@ def parse_attendance_value(value: str):
         parts = [p.strip() for p in value.split("|", 1)]
         return parts[0], parts[1]
     return value, ""
+
+
+def is_date_col(header: str) -> bool:
+    return bool(re.match(r"^\d{2}/\d{2}/\d{4}$", str(header or "").strip()))
 
 
 # ===================== ĐĂNG NHẬP QUẢN TRỊ =====================
@@ -313,63 +326,132 @@ def _get_gspread_client():
     return gspread.authorize(creds)
 
 
-def get_sheet():
+def get_spreadsheet():
     client = _get_gspread_client()
-    ss = _google_api_retry(lambda: client.open_by_key(SHEET_KEY))
-    return _google_api_retry(lambda: ss.worksheet(WORKSHEET_NAME))
+    return _google_api_retry(lambda: client.open_by_key(SHEET_KEY))
 
 
-def load_records(sheet):
-    return _google_api_retry(lambda: sheet.get_all_records(expected_headers=None, default_blank=""))
+def get_worksheet_or_none(ss, title: str):
+    try:
+        return _google_api_retry(lambda: ss.worksheet(title))
+    except Exception:
+        return None
 
 
-def find_header_col(sheet, header_name):
-    return _google_api_retry(lambda: sheet.find(header_name)).col
+def get_sheet_headers(ws):
+    return _google_api_retry(lambda: ws.row_values(1))
 
 
-def ensure_required_headers(sheet):
-    headers = _google_api_retry(lambda: sheet.row_values(1))
+def load_records(ws):
+    return _google_api_retry(lambda: ws.get_all_records(expected_headers=None, default_blank=""))
+
+
+def find_header_col(ws, header_name):
+    return _google_api_retry(lambda: ws.find(header_name)).col
+
+
+def find_staff_row(ws, msgv_full: str):
+    try:
+        return _google_api_retry(lambda: ws.find(msgv_full))
+    except Exception:
+        return None
+
+
+def ensure_month_headers(ws, d=None):
+    if d is None:
+        d = today_date()
+
+    headers = get_sheet_headers(ws)
     if not headers:
         headers = []
 
-    required = ["MSGV", "Họ và tên", "Đơn vị"]
     changed = False
-
-    for h in required:
-        if h not in headers:
-            headers.append(h)
+    for col in BASE_INFO_COLUMNS:
+        if col not in headers:
+            headers.append(col)
             changed = True
 
-    for h in current_month_working_day_headers():
-        if h not in headers:
-            headers.append(h)
+    for col in current_month_working_day_headers(d):
+        if col not in headers:
+            headers.append(col)
             changed = True
 
     if changed:
-        _google_api_retry(lambda: sheet.update("1:1", [headers]))
+        _google_api_retry(lambda: ws.update("1:1", [headers]))
 
     return headers
 
 
-def ensure_today_column(sheet):
-    headers = ensure_required_headers(sheet)
-    h = today_header()
+def copy_staff_list_from_previous_sheet(ss, new_ws, d=None):
+    if d is None:
+        d = today_date()
 
+    prev_title = previous_month_sheet_name(d)
+    prev_ws = get_worksheet_or_none(ss, prev_title)
+
+    if prev_ws is None:
+        return False
+
+    prev_headers = get_sheet_headers(prev_ws)
+    records = load_records(prev_ws)
+
+    base_cols = [c for c in BASE_INFO_COLUMNS if c in prev_headers]
+    if not base_cols:
+        return False
+
+    new_headers = BASE_INFO_COLUMNS + current_month_working_day_headers(d)
+    rows = [new_headers]
+
+    for r in records:
+        rows.append([r.get(c, "") for c in BASE_INFO_COLUMNS] + [""] * len(current_month_working_day_headers(d)))
+
+    _google_api_retry(lambda: new_ws.clear())
+    _google_api_retry(lambda: new_ws.update("A1", rows))
+    return True
+
+
+def create_blank_month_sheet(ws, d=None):
+    if d is None:
+        d = today_date()
+
+    headers = BASE_INFO_COLUMNS + current_month_working_day_headers(d)
+    _google_api_retry(lambda: ws.update("A1", [headers]))
+
+
+def get_or_create_month_sheet(d=None):
+    if d is None:
+        d = today_date()
+
+    ss = get_spreadsheet()
+    title = month_sheet_name(d)
+    ws = get_worksheet_or_none(ss, title)
+
+    if ws is not None:
+        ensure_month_headers(ws, d)
+        return ws
+
+    ws = _google_api_retry(lambda: ss.add_worksheet(title=title, rows=300, cols=50))
+
+    copied = copy_staff_list_from_previous_sheet(ss, ws, d)
+    if not copied:
+        create_blank_month_sheet(ws, d)
+
+    ensure_month_headers(ws, d)
+    return ws
+
+
+def ensure_today_column(ws):
     if today_date().weekday() == 6:
         raise RuntimeError("Hôm nay là Chủ nhật, hệ thống không mở cột điểm danh.")
 
+    headers = ensure_month_headers(ws, today_date())
+    h = today_header()
+
     if h not in headers:
         headers.append(h)
-        _google_api_retry(lambda: sheet.update("1:1", [headers]))
+        _google_api_retry(lambda: ws.update("1:1", [headers]))
 
     return headers.index(h) + 1
-
-
-def find_staff_row(sheet, msgv_full: str):
-    try:
-        return _google_api_retry(lambda: sheet.find(msgv_full))
-    except Exception:
-        return None
 
 
 # ===================== KIỂM TRA GPS THEO CƠ SỞ =====================
@@ -401,9 +483,9 @@ def render_location_check(campus_code: str):
         st.warning("Không lấy được tọa độ GPS từ thiết bị. Vui lòng thử lại.")
         st.stop()
 
-    student_loc = (float(lat), float(lon))
+    staff_loc = (float(lat), float(lon))
     campus_loc = (campus["lat"], campus["lon"])
-    distance = geodesic(student_loc, campus_loc).meters
+    distance = geodesic(staff_loc, campus_loc).meters
 
     st.caption(f"Khoảng cách đến cơ sở: {distance:.0f} m. Phạm vi cho phép: {campus['radius']} m.")
 
@@ -416,24 +498,19 @@ def render_location_check(campus_code: str):
 
 # ===================== GIAO DIỆN QUẢN TRỊ =====================
 def render_tab_qr():
-    st.subheader("Tạo mã QR điểm danh giảng viên theo ngày")
-    st.caption("QR có hiệu lực trong ngày hiện hành. Hệ thống tự động ghi nhận vào cột ngày hiện tại.")
-
-    if today_date().weekday() == 6:
-        st.warning("Hôm nay là Chủ nhật. Hệ thống không tạo mã điểm danh.")
-        return
+    st.subheader("Tạo mã QR cố định theo cơ sở")
+    st.caption("Mỗi cơ sở chỉ cần tạo QR một lần. QR tự ghi nhận theo ngày hiện hành và sheet tháng hiện hành.")
 
     campus_name = st.selectbox("Chọn cơ sở", list(LOCATIONS.keys()))
     campus_code = LOCATIONS[campus_name]["code"]
 
-    st.info(f"Ngày điểm danh: {today_header()}")
     st.info(f"Cơ sở: {campus_name} - {LOCATIONS[campus_name]['address']}")
+    st.info(f"Sheet tháng hiện tại: {month_sheet_name()} | Ngày hiện tại: {today_header()}")
 
-    if st.button("Tạo mã QR", type="primary", use_container_width=True):
+    if st.button("Tạo mã QR cố định", type="primary", use_container_width=True):
         base_url = get_base_url()
         qr_data = (
             f"{base_url}/?gv=1"
-            f"&ngay={urllib.parse.quote(token_today())}"
             f"&coso={urllib.parse.quote(campus_code)}"
         )
 
@@ -443,8 +520,8 @@ def render_tab_qr():
         buf.seek(0)
         img = Image.open(buf)
 
-        st.image(img, caption="Quét mã để điểm danh giảng viên", width=380)
-        st.caption("Mã QR này dùng cho ngày hiện hành.")
+        st.image(img, caption=f"QR cố định cho {campus_name}", width=380)
+        st.caption("Có thể in/dán QR này tại cơ sở. Không cần tạo lại mỗi ngày.")
         with st.expander("Xem link QR"):
             st.code(qr_data)
 
@@ -477,13 +554,14 @@ def find_staff_candidates(records, query: str):
 
 def render_tab_search():
     st.subheader("Tìm kiếm thông tin giảng viên")
+    st.caption(f"Đang tra cứu trong sheet tháng: {month_sheet_name()}")
+
     q = st.text_input("Nhập 4 số cuối MSGV hoặc họ tên", placeholder="Ví dụ: 1234 hoặc Nguyễn Văn A")
 
     if st.button("Tìm", use_container_width=True):
         try:
-            sheet = get_sheet()
-            ensure_required_headers(sheet)
-            records = load_records(sheet)
+            ws = get_or_create_month_sheet()
+            records = load_records(ws)
             results = find_staff_candidates(records, q)
 
             if not results:
@@ -499,20 +577,44 @@ def render_tab_search():
 
 
 def render_tab_stats():
-    st.subheader("Thống kê điểm danh giảng viên theo ngày")
-    st.caption("Mục này chỉ thống kê các thông tin đã điểm danh theo ngày, giờ và cơ sở.")
+    st.subheader("Thống kê điểm danh giảng viên")
+    st.caption("Thống kê theo ngày, giờ và cơ sở. Không thống kê có mặt/vắng mặt.")
 
     try:
-        sheet = get_sheet()
-        headers = ensure_required_headers(sheet)
-        records = load_records(sheet)
+        ss = get_spreadsheet()
+        worksheet_titles = [ws.title for ws in _google_api_retry(lambda: ss.worksheets())]
+        month_titles = [t for t in worksheet_titles if re.match(r"^[A-Za-z]+-\d{4}$", t)]
 
-        date_cols = [h for h in headers if re.match(r"^\d{2}/\d{2}/\d{4}$", str(h))]
+        current_title = month_sheet_name()
+        if current_title not in month_titles:
+            get_or_create_month_sheet()
+            month_titles.append(current_title)
+
+        month_titles = sorted(set(month_titles))
+        selected_month = st.selectbox(
+            "Chọn tháng",
+            month_titles,
+            index=month_titles.index(current_title) if current_title in month_titles else len(month_titles) - 1,
+        )
+
+        ws = get_worksheet_or_none(ss, selected_month)
+        if ws is None:
+            st.warning("Không tìm thấy sheet tháng đã chọn.")
+            return
+
+        headers = ensure_month_headers(ws)
+        records = load_records(ws)
+
+        date_cols = [h for h in headers if is_date_col(h)]
         if not date_cols:
             st.warning("Chưa có cột ngày điểm danh.")
             return
 
-        selected_day = st.selectbox("Chọn ngày", date_cols, index=date_cols.index(today_header()) if today_header() in date_cols else len(date_cols) - 1)
+        selected_day = st.selectbox(
+            "Chọn ngày",
+            date_cols,
+            index=date_cols.index(today_header()) if today_header() in date_cols else 0,
+        )
 
         rows = []
         for r in records:
@@ -522,12 +624,14 @@ def render_tab_stats():
 
             hour, campus = parse_attendance_value(raw)
             rows.append({
+                "Tháng": selected_month,
                 "Ngày": selected_day,
                 "Giờ điểm danh": hour,
                 "Cơ sở": campus,
                 "MSGV": r.get("MSGV", ""),
                 "Họ và tên": r.get("Họ và tên", ""),
                 "Đơn vị": r.get("Đơn vị", ""),
+                "Bộ môn": r.get("Bộ môn", ""),
             })
 
         st.metric("Số lượt đã điểm danh", len(rows))
@@ -553,13 +657,14 @@ def render_tab_stats():
 
 
 def render_tab_data_setup():
-    st.subheader("Cấu trúc dữ liệu điểm danh")
-    st.caption("Hệ thống tự tạo các cột ngày trong tháng hiện tại, bỏ qua Chủ nhật.")
+    st.subheader("Cấu trúc dữ liệu theo tháng")
+    st.caption("Hệ thống tự dùng/tạo sheet tháng hiện hành, ví dụ June-2026, July-2026. Mỗi tháng tự có các cột ngày, bỏ Chủ nhật.")
 
     try:
-        sheet = get_sheet()
-        headers = ensure_required_headers(sheet)
-        st.success("Đã kiểm tra/cập nhật cấu trúc Google Sheet.")
+        ws = get_or_create_month_sheet()
+        headers = ensure_month_headers(ws)
+
+        st.success(f"Đã kiểm tra/cập nhật sheet tháng: {ws.title}")
         st.write("Các cột hiện có:")
         st.dataframe(pd.DataFrame({"Tên cột": headers}), use_container_width=True)
 
@@ -570,7 +675,6 @@ def render_tab_data_setup():
 # ===================== MÀN HÌNH GIẢNG VIÊN ĐIỂM DANH =====================
 def render_gv_attendance():
     qp = get_query_params()
-    date_token = qp.get("ngay", "")
     campus_code = qp.get("coso", "CS1")
 
     st.title("Điểm danh giảng viên")
@@ -579,16 +683,14 @@ def render_gv_attendance():
         st.error("Hôm nay là Chủ nhật, hệ thống không mở điểm danh.")
         st.stop()
 
-    if not qr_token_valid(date_token):
-        st.error("Mã QR không hợp lệ hoặc không thuộc ngày hiện hành. Vui lòng quét mã QR mới.")
-        st.stop()
-
     campus_name = LOCATION_BY_CODE.get(campus_code)
     if not campus_name:
         st.error("Cơ sở điểm danh không hợp lệ.")
         st.stop()
 
     st.info(f"Ngày điểm danh: {today_header()}")
+    st.info(f"Sheet tháng: {month_sheet_name()}")
+
     render_location_check(campus_code)
 
     msgv_suffix = st.text_input(
@@ -614,22 +716,22 @@ def render_gv_attendance():
         msgv_full = f"{MSGV_PREFIX}{msgv_suffix.strip().zfill(4)}"
 
         try:
-            sheet = get_sheet()
-            today_col = ensure_today_column(sheet)
+            ws = get_or_create_month_sheet()
+            today_col = ensure_today_column(ws)
 
-            staff_cell = find_staff_row(sheet, msgv_full)
+            staff_cell = find_staff_row(ws, msgv_full)
             if not staff_cell:
                 st.error(f"Không tìm thấy MSGV {msgv_full} trong danh sách.")
                 st.stop()
 
-            name_col = find_header_col(sheet, "Họ và tên")
-            name_in_sheet = (_google_api_retry(lambda: sheet.cell(staff_cell.row, name_col)).value or "").strip()
+            name_col = find_header_col(ws, "Họ và tên")
+            name_in_sheet = (_google_api_retry(lambda: ws.cell(staff_cell.row, name_col)).value or "").strip()
 
             if normalize_name(name_in_sheet) != normalize_name(hoten):
                 st.error("Họ tên không khớp với MSGV trong danh sách.")
                 st.stop()
 
-            current_value = (_google_api_retry(lambda: sheet.cell(staff_cell.row, today_col)).value or "").strip()
+            current_value = (_google_api_retry(lambda: ws.cell(staff_cell.row, today_col)).value or "").strip()
             if current_value:
                 hour, campus = parse_attendance_value(current_value)
                 st.info(f"MSGV {msgv_full} đã điểm danh ngày {today_header()} lúc {hour} tại {campus}.")
@@ -637,7 +739,7 @@ def render_gv_attendance():
 
             time_str = now_vn().strftime("%H:%M:%S")
             value = attendance_value(time_str, campus_name)
-            _google_api_retry(lambda: sheet.update_cell(staff_cell.row, today_col, value))
+            _google_api_retry(lambda: ws.update_cell(staff_cell.row, today_col, value))
 
             st.success(f"Điểm danh thành công! MSGV {msgv_full}, ngày {today_header()}, lúc {time_str}, tại {campus_name}.")
 
@@ -664,12 +766,12 @@ with st.sidebar:
     st.markdown("**Điều hướng**")
     menu = st.radio(
         "Chọn mục",
-        options=["Tạo mã QR", "Tìm kiếm giảng viên", "Thống kê điểm danh", "Cấu trúc dữ liệu"],
+        options=["Tạo QR cố định", "Tìm kiếm giảng viên", "Thống kê điểm danh", "Cấu trúc dữ liệu"],
         index=0,
         label_visibility="collapsed",
     )
 
-if menu == "Tạo mã QR":
+if menu == "Tạo QR cố định":
     render_tab_qr()
 elif menu == "Tìm kiếm giảng viên":
     render_tab_search()
