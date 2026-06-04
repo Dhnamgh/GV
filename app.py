@@ -181,6 +181,78 @@ def normalize_date_value(value):
     return s
 
 
+def parse_date_value(value):
+    """Đổi ngày từ Google Sheet về date object."""
+    s = normalize_date_value(value)
+    if not s:
+        return None
+    try:
+        return datetime.datetime.strptime(s, "%d/%m/%Y").date()
+    except Exception:
+        return None
+
+
+def current_week_range():
+    today = today_date()
+    start = today - datetime.timedelta(days=today.weekday())
+    end = start + datetime.timedelta(days=6)
+    return start, end
+
+
+def current_month_range():
+    today = today_date()
+    start = today.replace(day=1)
+    if today.month == 12:
+        end = today.replace(year=today.year + 1, month=1, day=1) - datetime.timedelta(days=1)
+    else:
+        end = today.replace(month=today.month + 1, day=1) - datetime.timedelta(days=1)
+    return start, end
+
+
+def group_bo_mon_don_vi(row):
+    """Tên nhóm thống kê: ưu tiên Bộ môn, nếu trống thì dùng Đơn vị."""
+    bo_mon = safe_str(row.get("Bộ môn"))
+    don_vi = safe_str(row.get("Đơn vị"))
+    if bo_mon:
+        return bo_mon
+    if don_vi:
+        return don_vi
+    return "Chưa xác định"
+
+
+def log_sort_key(row):
+    """Sắp xếp log theo timestamp, fallback theo ngày + giờ."""
+    ts = safe_str(row.get("Timestamp"))
+    if ts:
+        try:
+            return datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+    d = parse_date_value(row.get("Ngày")) or today_date()
+    t = parse_time_value(row.get("Giờ")) or datetime.time(0, 0, 0)
+    return datetime.datetime.combine(d, t)
+
+
+def latest_open_in_log(logs, shift):
+    """
+    Trả về lần vào ca gần nhất chưa có ra ca tương ứng.
+    Cho phép trong cùng ca có nhiều cặp IN/OUT.
+    """
+    ordered = sorted(
+        [r for r in logs if safe_str(r.get("Ca")) == shift],
+        key=log_sort_key,
+    )
+    open_in = None
+    for r in ordered:
+        action = safe_str(r.get("IN/OUT")).upper()
+        if action == "IN":
+            open_in = r
+        elif action == "OUT" and open_in is not None:
+            open_in = None
+    return open_in
+
+
 def parse_time_value(value):
     """Đọc giờ từ dạng HH:MM:SS hoặc timestamp yyyy-mm-dd HH:MM:SS."""
     s = str(value or "").strip()
@@ -577,50 +649,35 @@ def render_gv_attendance():
             st.error(f"Không tìm thấy MSGV {msgv_full}.")
             st.stop()
 
-        # Khóa tạm theo phiên để tránh bấm liên tục ghi trùng trước khi Google Sheet cập nhật xong.
-        session_key = f"logged_{today_str()}_{msgv_full}_{shift}_{action}"
-        if st.session_state.get(session_key):
-            label = "vào ca" if action == "IN" else "ra ca"
-            st.info(f"MSGV {msgv_full} đã điểm danh {label} {shift} hôm nay. Hệ thống không ghi trùng.")
-            st.stop()
-
         current_logs = logs_for_msgv_today(msgv_full)
+        open_in = latest_open_in_log(current_logs, shift)
 
-        already = any(
-            safe_str(r.get("Ca")) == shift and safe_str(r.get("IN/OUT")).upper() == action
-            for r in current_logs
-        )
-
-        if already:
-            label = "vào ca" if action == "IN" else "ra ca"
-            st.session_state[session_key] = True
-            st.info(f"MSGV {msgv_full} đã điểm danh {label} {shift} hôm nay. Hệ thống không ghi trùng.")
-            st.stop()
-
-        if action == "OUT":
-            in_logs = [
-                r for r in current_logs
-                if safe_str(r.get("Ca")) == shift and safe_str(r.get("IN/OUT")).upper() == "IN"
-            ]
-
-            if not in_logs:
-                st.warning(f"Chưa có dữ liệu vào ca {shift}. Vui lòng điểm danh vào ca trước.")
+        # Khóa tạm để tránh bấm liên tục trước khi Google Sheet cập nhật xong.
+        # Với IN: chỉ chặn nếu đang có một lần vào ca chưa ra ca.
+        # Nếu đã OUT rồi thì cho phép IN lại trong cùng buổi để mở ca mới.
+        if action == "IN":
+            session_key = f"open_{today_str()}_{msgv_full}_{shift}"
+            if st.session_state.get(session_key) or open_in is not None:
+                st.info(f"MSGV {msgv_full} đã vào ca {shift} và chưa ra ca. Hệ thống không ghi trùng.")
                 st.stop()
 
-            # Lấy giờ vào ca sớm nhất trong cùng ca
-            in_times = []
-            for r in in_logs:
-                parsed = parse_time_value(r.get("Giờ")) or parse_time_value(r.get("Timestamp"))
-                if parsed:
-                    in_times.append(parsed)
+        if action == "OUT":
+            session_key = f"close_{today_str()}_{msgv_full}_{shift}_{len(current_logs)}"
 
-            if not in_times:
+            if st.session_state.get(session_key):
+                st.info(f"MSGV {msgv_full} đã ra ca {shift}. Hệ thống không ghi trùng.")
+                st.stop()
+
+            if open_in is None:
+                st.warning(f"Chưa có dữ liệu vào ca {shift} hoặc ca trước đã ra ca. Vui lòng điểm danh vào ca trước.")
+                st.stop()
+
+            parsed = parse_time_value(open_in.get("Giờ")) or parse_time_value(open_in.get("Timestamp"))
+            if not parsed:
                 st.warning("Không đọc được giờ vào ca. Vui lòng liên hệ quản trị để kiểm tra dữ liệu Log.")
                 st.stop()
 
-            first_in_time = min(in_times)
-            elapsed_minutes = minutes_since_time(first_in_time)
-
+            elapsed_minutes = minutes_since_time(parsed)
             if elapsed_minutes < MIN_OUT_MINUTES:
                 remain = int(MIN_OUT_MINUTES - elapsed_minutes + 0.999)
                 st.warning(
@@ -643,7 +700,12 @@ def render_gv_attendance():
             "Timestamp": timestamp_str(),
         })
 
-        st.session_state[session_key] = True
+        if action == "IN":
+            st.session_state[f"open_{today_str()}_{msgv_full}_{shift}"] = True
+        else:
+            st.session_state[f"open_{today_str()}_{msgv_full}_{shift}"] = False
+            st.session_state[session_key] = True
+
         st.success(f"{action_label} thành công!")
         st.write(f"MSGV: **{msgv_full}**")
         st.write(f"Ca: **{shift}**")
@@ -683,44 +745,78 @@ def render_tab_search():
 
 
 def render_tab_stats():
-    st.subheader("Thống kê điểm danh")
+    st.subheader("Thống kê theo Bộ môn - Đơn vị")
     logs = load_logs()
     if not logs:
         st.info("Chưa có dữ liệu điểm danh.")
         return
+
     df = pd.DataFrame(logs)
     for c in LOG_COLUMNS:
         if c not in df.columns:
             df[c] = ""
 
-    dates = sorted([x for x in df["Ngày"].dropna().astype(str).unique() if x])
-    selected = st.selectbox("Chọn ngày", dates, index=len(dates)-1)
-    filtered = df[df["Ngày"].astype(str) == selected].copy()
+    df["Ngày_chuẩn"] = df["Ngày"].apply(normalize_date_value)
+    df["Ngày_dt"] = df["Ngày"].apply(parse_date_value)
+    df["Bộ môn - Đơn vị"] = df.apply(group_bo_mon_don_vi, axis=1)
+
+    mode = st.radio(
+        "Chọn phạm vi thống kê",
+        ["Theo ngày", "Theo tuần hiện hành", "Theo tháng hiện hành"],
+        horizontal=True,
+        index=0,
+    )
+
+    if mode == "Theo ngày":
+        valid_dates = sorted([d for d in df["Ngày_chuẩn"].dropna().astype(str).unique() if d])
+        default_idx = valid_dates.index(today_str()) if today_str() in valid_dates else len(valid_dates) - 1
+        selected = st.selectbox("Chọn ngày", valid_dates, index=default_idx if valid_dates else 0)
+        filtered = df[df["Ngày_chuẩn"] == selected].copy()
+        title_scope = f"ngày {selected}"
+
+    elif mode == "Theo tuần hiện hành":
+        start, end = current_week_range()
+        filtered = df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy()
+        title_scope = f"tuần hiện hành ({start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})"
+
+    else:
+        start, end = current_month_range()
+        filtered = df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy()
+        title_scope = f"tháng hiện hành ({start.strftime('%m/%Y')})"
+
     st.metric("Số lượt log", len(filtered))
-    st.dataframe(filtered, use_container_width=True)
+
+    if filtered.empty:
+        st.info(f"Chưa có dữ liệu trong {title_scope}.")
+        return
+
+    st.dataframe(filtered.drop(columns=["Ngày_dt"], errors="ignore"), use_container_width=True)
 
     summary = summarize_hours(filtered.to_dict("records"))
     if not summary.empty:
+        summary["Bộ môn - Đơn vị"] = summary.apply(group_bo_mon_don_vi, axis=1)
+
         st.subheader("Tổng hợp giờ có mặt")
         st.dataframe(summary, use_container_width=True)
 
-        st.subheader("Thống kê theo bộ môn")
+        st.subheader(f"Thống kê theo Bộ môn - Đơn vị trong {title_scope}")
         dept_summary = (
-            summary.groupby("Bộ môn", dropna=False)
+            summary.groupby("Bộ môn - Đơn vị", dropna=False)
             .agg(
                 Số_giảng_viên=("MSGV", "nunique"),
+                Số_ca_có_dữ_liệu=("MSGV", "count"),
                 Tổng_giờ_có_mặt=("Giờ có mặt", lambda s: round(pd.to_numeric(s, errors="coerce").fillna(0).sum(), 2))
             )
             .reset_index()
         )
         st.dataframe(dept_summary, use_container_width=True)
 
-        dept_df = filtered.groupby("Bộ môn", dropna=False).size().reset_index(name="Số lượt")
-        chart = alt.Chart(dept_df).mark_bar().encode(
-            x=alt.X("Bộ môn:N", title="Bộ môn"),
-            y=alt.Y("Số lượt:Q", title="Số lượt"),
-            tooltip=["Bộ môn", "Số lượt"],
-        ).properties(height=320)
+        chart = alt.Chart(dept_summary).mark_bar().encode(
+            x=alt.X("Bộ môn - Đơn vị:N", title="Bộ môn - Đơn vị", sort="-y"),
+            y=alt.Y("Tổng_giờ_có_mặt:Q", title="Tổng giờ có mặt"),
+            color=alt.Color("Bộ môn - Đơn vị:N", title="Bộ môn - Đơn vị"),
+            tooltip=["Bộ môn - Đơn vị", "Số_giảng_viên", "Số_ca_có_dữ_liệu", "Tổng_giờ_có_mặt"],
+        ).properties(height=360)
         st.altair_chart(chart, use_container_width=True)
 
 
