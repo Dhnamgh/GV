@@ -34,6 +34,9 @@ STAFF_SHEET_NAME = st.secrets.get("STAFF_SHEET_NAME", "NhanSu")
 LOG_SHEET_NAME = st.secrets.get("LOG_SHEET_NAME", "Log")
 VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
 
+# Tối thiểu 2 tiết x 50 phút trước khi được ra ca
+MIN_OUT_MINUTES = int(st.secrets.get("MIN_OUT_MINUTES", 100))
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -47,14 +50,14 @@ LOCATIONS = {
         "code": "CS1",
         "lat": 10.754665,
         "lon": 106.663381,
-        "radius": 100,
+        "radius": 500,
         "address": "217 Hồng Bàng, Phường Chợ Lớn, TP.HCM",
     },
     "Cơ sở 2 - Đinh Tiên Hoàng": {
         "code": "CS2",
         "lat": 10.785434,
         "lon": 106.702667,
-        "radius": 100,
+        "radius": 400,
         "address": "43 Đinh Tiên Hoàng, Phường Sài Gòn, TP.HCM",
     },
 }
@@ -176,6 +179,28 @@ def normalize_date_value(value):
         return f"{int(d):02d}/{int(mo):02d}/{y}"
 
     return s
+
+
+def parse_time_value(value):
+    """Đọc giờ từ dạng HH:MM:SS hoặc timestamp yyyy-mm-dd HH:MM:SS."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+
+    m = re.search(r"(\d{1,2}:\d{2}:\d{2})", s)
+    if not m:
+        return None
+
+    try:
+        return datetime.datetime.strptime(m.group(1), "%H:%M:%S").time()
+    except Exception:
+        return None
+
+
+def minutes_since_time(t_obj):
+    now = now_vn()
+    start = datetime.datetime.combine(today_date(), t_obj, tzinfo=VN_TZ)
+    return (now - start).total_seconds() / 60
 
 
 def time_str():
@@ -573,12 +598,35 @@ def render_gv_attendance():
             st.stop()
 
         if action == "OUT":
-            has_in = any(
-                safe_str(r.get("Ca")) == shift and safe_str(r.get("IN/OUT")).upper() == "IN"
-                for r in current_logs
-            )
-            if not has_in:
+            in_logs = [
+                r for r in current_logs
+                if safe_str(r.get("Ca")) == shift and safe_str(r.get("IN/OUT")).upper() == "IN"
+            ]
+
+            if not in_logs:
                 st.warning(f"Chưa có dữ liệu vào ca {shift}. Vui lòng điểm danh vào ca trước.")
+                st.stop()
+
+            # Lấy giờ vào ca sớm nhất trong cùng ca
+            in_times = []
+            for r in in_logs:
+                parsed = parse_time_value(r.get("Giờ")) or parse_time_value(r.get("Timestamp"))
+                if parsed:
+                    in_times.append(parsed)
+
+            if not in_times:
+                st.warning("Không đọc được giờ vào ca. Vui lòng liên hệ quản trị để kiểm tra dữ liệu Log.")
+                st.stop()
+
+            first_in_time = min(in_times)
+            elapsed_minutes = minutes_since_time(first_in_time)
+
+            if elapsed_minutes < MIN_OUT_MINUTES:
+                remain = int(MIN_OUT_MINUTES - elapsed_minutes + 0.999)
+                st.warning(
+                    f"Chưa đủ thời gian tối thiểu để ra ca. "
+                    f"Cần đủ {MIN_OUT_MINUTES} phút kể từ lúc vào ca; còn khoảng {remain} phút."
+                )
                 st.stop()
 
         t = time_str()
@@ -655,11 +703,23 @@ def render_tab_stats():
     if not summary.empty:
         st.subheader("Tổng hợp giờ có mặt")
         st.dataframe(summary, use_container_width=True)
-        campus_df = filtered.groupby("CS", dropna=False).size().reset_index(name="Số lượt")
-        chart = alt.Chart(campus_df).mark_bar().encode(
-            x=alt.X("CS:N", title="Cơ sở"),
+
+        st.subheader("Thống kê theo bộ môn")
+        dept_summary = (
+            summary.groupby("Bộ môn", dropna=False)
+            .agg(
+                Số_giảng_viên=("MSGV", "nunique"),
+                Tổng_giờ_có_mặt=("Giờ có mặt", lambda s: round(pd.to_numeric(s, errors="coerce").fillna(0).sum(), 2))
+            )
+            .reset_index()
+        )
+        st.dataframe(dept_summary, use_container_width=True)
+
+        dept_df = filtered.groupby("Bộ môn", dropna=False).size().reset_index(name="Số lượt")
+        chart = alt.Chart(dept_df).mark_bar().encode(
+            x=alt.X("Bộ môn:N", title="Bộ môn"),
             y=alt.Y("Số lượt:Q", title="Số lượt"),
-            tooltip=["CS", "Số lượt"],
+            tooltip=["Bộ môn", "Số lượt"],
         ).properties(height=320)
         st.altair_chart(chart, use_container_width=True)
 
