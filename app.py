@@ -124,6 +124,11 @@ input {
         max-width: 100% !important;
         box-sizing: border-box !important;
     }
+    div[role="radiogroup"] {
+        display: flex !important;
+        gap: 0.5rem !important;
+        flex-wrap: wrap !important;
+    }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -431,43 +436,113 @@ def render_gv_attendance():
     qp = get_query_params()
     campus_code = qp.get("coso", "CS1")
     campus_name = LOCATION_BY_CODE.get(campus_code)
+
     st.title("Điểm danh giảng viên")
+
     if today_date().weekday() == 6:
         st.error("Chủ nhật không mở điểm danh.")
         st.stop()
+
     if not campus_name:
         st.error("Cơ sở điểm danh không hợp lệ.")
         st.stop()
+
     st.info(f"Ngày: {today_str()}")
     render_location_check(campus_code)
-    msgv_suffix = st.text_input("4 số cuối MSGV", placeholder="VD: 1234", max_chars=4, help=None)
+
+    shift = infer_shift()
+    st.info(f"Ca hiện tại: {shift}")
+
+    action_label = st.radio(
+        "Chọn loại điểm danh",
+        ["Vào ca", "Ra ca"],
+        horizontal=True,
+        key="action_label",
+    )
+    action = "IN" if action_label == "Vào ca" else "OUT"
+
+    msgv_suffix = st.text_input(
+        "4 số cuối MSGV",
+        placeholder="VD: 1234",
+        max_chars=4,
+        help=None,
+        key="msgv_suffix",
+    )
+
     if msgv_suffix.strip().isdigit() and len(msgv_suffix.strip()) == 4:
-        st.caption(f"MSGV: {MSGV_PREFIX}{msgv_suffix.strip().zfill(4)}")
+        msgv_full_preview = f"{MSGV_PREFIX}{msgv_suffix.strip().zfill(4)}"
+        st.caption(f"MSGV: {msgv_full_preview}")
+
     if st.button("Xác nhận điểm danh", type="primary", use_container_width=True):
         if not msgv_suffix.strip().isdigit() or len(msgv_suffix.strip()) != 4:
             st.warning("Vui lòng nhập đúng 4 số cuối MSGV.")
             st.stop()
+
         msgv_full = f"{MSGV_PREFIX}{msgv_suffix.strip().zfill(4)}"
+
         try:
             staff = find_staff_by_msgv(msgv_full)
             if not staff:
                 st.error(f"Không tìm thấy MSGV {msgv_full}.")
                 st.stop()
-            action, shift = next_action_for_msgv(msgv_full)
-            if action is None:
-                st.info(f"MSGV {msgv_full} đã đủ vào/ra ca {shift} hôm nay.")
+
+            # Chặn ghi trùng: cùng ngày + cùng MSGV + cùng ca + cùng loại IN/OUT chỉ được ghi 1 lần.
+            today_logs = get_today_logs_for_msgv(msgv_full)
+            already_logged = any(
+                str(r.get("Ca", "")).strip() == shift
+                and str(r.get("IN/OUT", "")).strip() == action
+                for r in today_logs
+            )
+
+            if already_logged:
+                label = "vào ca" if action == "IN" else "ra ca"
+                st.info(f"MSGV {msgv_full} đã điểm danh {label} {shift} hôm nay. Hệ thống không ghi trùng.")
                 st.stop()
+
+            # Nếu chọn ra ca nhưng chưa có vào ca trong cùng ca thì nhắc lại, không ghi.
+            if action == "OUT":
+                has_in = any(
+                    str(r.get("Ca", "")).strip() == shift
+                    and str(r.get("IN/OUT", "")).strip() == "IN"
+                    for r in today_logs
+                )
+                if not has_in:
+                    st.warning(f"Chưa có dữ liệu vào ca {shift}. Vui lòng điểm danh vào ca trước.")
+                    st.stop()
+
             t = time_str()
             append_log({
-                "Ngày": today_str(), "MSGV": msgv_full, "Họ và tên": staff.get("Họ và tên", ""),
-                "Đơn vị": staff.get("Đơn vị", ""), "Bộ môn": staff.get("Bộ môn", ""),
-                "CS": campus_code, "Ca": shift, "IN/OUT": action,
-                "Giờ": t, "Timestamp": timestamp_str(),
+                "Ngày": today_str(),
+                "MSGV": msgv_full,
+                "Họ và tên": staff.get("Họ và tên", ""),
+                "Đơn vị": staff.get("Đơn vị", ""),
+                "Bộ môn": staff.get("Bộ môn", ""),
+                "CS": campus_code,
+                "Ca": shift,
+                "IN/OUT": action,
+                "Giờ": t,
+                "Timestamp": timestamp_str(),
             })
-            label = "Vào ca" if action == "IN" else "Ra ca"
-            st.success(f"{label} thành công!\n\nMSGV: {msgv_full}\n\nCa: {shift}\n\nGiờ: {t}\n\nCơ sở: {campus_code}")
+
+            st.success(
+                f"{action_label} thành công!
+
+"
+                f"MSGV: {msgv_full}
+
+"
+                f"Ca: {shift}
+
+"
+                f"Giờ: {t}
+
+"
+                f"Cơ sở: {campus_code}"
+            )
+
         except Exception as e:
             st.error(f"Lỗi khi điểm danh: {e}")
+
 
 def render_tab_qr():
     st.subheader("Tạo QR cố định theo cơ sở")
