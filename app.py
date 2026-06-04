@@ -150,6 +150,34 @@ def today_str():
     return today_date().strftime("%d/%m/%Y")
 
 
+def today_iso():
+    return today_date().strftime("%Y-%m-%d")
+
+
+def normalize_date_value(value):
+    """
+    Google Sheets có thể trả ngày dưới dạng 04/06/2026 hoặc 2026-06-04.
+    Hàm này quy về dd/mm/YYYY để so khớp ổn định.
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+
+    # dd/mm/yyyy
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+    if m:
+        d, mo, y = m.groups()
+        return f"{int(d):02d}/{int(mo):02d}/{y}"
+
+    # yyyy-mm-dd or yyyy-mm-dd hh:mm:ss
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        y, mo, d = m.groups()
+        return f"{int(d):02d}/{int(mo):02d}/{y}"
+
+    return s
+
+
 def time_str():
     return now_vn().strftime("%H:%M:%S")
 
@@ -385,15 +413,35 @@ def find_staff_by_msgv(msgv_full):
 
 
 def load_logs():
+    """
+    Đọc log theo header hiện có, không phụ thuộc định dạng của Google Sheets.
+    """
     return get_all_records_by_header(log_ws())
 
 
 def logs_for_msgv_today(msgv_full):
+    """
+    Lấy log trong ngày của một MSGV.
+    So khớp theo:
+    - ngày ở dạng dd/mm/yyyy hoặc yyyy-mm-dd
+    - MSGV đủ mã hoặc 4 số cuối
+    """
     target = norm_digits(msgv_full)
+    target_last4 = target[-4:]
     result = []
+
     for r in load_logs():
-        if safe_str(r.get("Ngày")) == today_str() and norm_digits(r.get("MSGV")) == target:
+        row_date = normalize_date_value(r.get("Ngày"))
+        row_msgv = norm_digits(r.get("MSGV"))
+        if not row_msgv:
+            continue
+
+        same_day = row_date == today_str()
+        same_msgv = row_msgv == target or row_msgv.zfill(len(target)) == target or row_msgv.endswith(target_last4)
+
+        if same_day and same_msgv:
             result.append(r)
+
     return result
 
 
@@ -504,21 +552,29 @@ def render_gv_attendance():
             st.error(f"Không tìm thấy MSGV {msgv_full}.")
             st.stop()
 
+        # Khóa tạm theo phiên để tránh bấm liên tục ghi trùng trước khi Google Sheet cập nhật xong.
+        session_key = f"logged_{today_str()}_{msgv_full}_{shift}_{action}"
+        if st.session_state.get(session_key):
+            label = "vào ca" if action == "IN" else "ra ca"
+            st.info(f"MSGV {msgv_full} đã điểm danh {label} {shift} hôm nay. Hệ thống không ghi trùng.")
+            st.stop()
+
         current_logs = logs_for_msgv_today(msgv_full)
 
         already = any(
-            safe_str(r.get("Ca")) == shift and safe_str(r.get("IN/OUT")) == action
+            safe_str(r.get("Ca")) == shift and safe_str(r.get("IN/OUT")).upper() == action
             for r in current_logs
         )
 
         if already:
             label = "vào ca" if action == "IN" else "ra ca"
+            st.session_state[session_key] = True
             st.info(f"MSGV {msgv_full} đã điểm danh {label} {shift} hôm nay. Hệ thống không ghi trùng.")
             st.stop()
 
         if action == "OUT":
             has_in = any(
-                safe_str(r.get("Ca")) == shift and safe_str(r.get("IN/OUT")) == "IN"
+                safe_str(r.get("Ca")) == shift and safe_str(r.get("IN/OUT")).upper() == "IN"
                 for r in current_logs
             )
             if not has_in:
@@ -539,6 +595,7 @@ def render_gv_attendance():
             "Timestamp": timestamp_str(),
         })
 
+        st.session_state[session_key] = True
         st.success(f"{action_label} thành công!")
         st.write(f"MSGV: **{msgv_full}**")
         st.write(f"Ca: **{shift}**")
