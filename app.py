@@ -525,18 +525,10 @@ def render_gv_attendance():
             })
 
             st.success(
-                f"{action_label} thành công!
-
-"
-                f"MSGV: {msgv_full}
-
-"
-                f"Ca: {shift}
-
-"
-                f"Giờ: {t}
-
-"
+                f"{action_label} thành công!\\n\\n"
+                f"MSGV: {msgv_full}\\n\\n"
+                f"Ca: {shift}\\n\\n"
+                f"Giờ: {t}\\n\\n"
                 f"Cơ sở: {campus_code}"
             )
 
