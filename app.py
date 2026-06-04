@@ -47,19 +47,30 @@ h2,h3 {font-size:24px!important;font-weight:900!important;color:#000!important;}
 p,span,div,label {color:#000!important;}
 label {font-size:17px!important;font-weight:800!important;}
 input,textarea {font-size:17px!important;font-weight:700!important;color:#000!important;min-height:44px!important;}
-.stButton button {width:100%!important;min-height:54px!important;font-size:18px!important;font-weight:900!important;white-space:normal!important;}
+.stButton, div[data-testid="stButton"] {width:100%!important;max-width:100%!important;}
+.stButton button, div[data-testid="stButton"] > button, button[kind="primary"] {
+  width:100%!important;
+  max-width:100%!important;
+  min-height:56px!important;
+  font-size:18px!important;
+  font-weight:900!important;
+  white-space:normal!important;
+  overflow:visible!important;
+  display:block!important;
+  text-align:center!important;
+}
 [data-testid="stMetricLabel"] {font-size:17px!important;font-weight:900!important;}
 [data-testid="stMetricValue"] {font-size:36px!important;font-weight:900!important;}
 [data-testid="stCaptionContainer"], small {font-size:14px!important;font-weight:700!important;}
 [data-testid="stAlert"] {font-size:17px!important;font-weight:800!important;}
 section[data-testid="stSidebar"] * {font-size:16px!important;font-weight:700!important;}
-.block-container {padding-bottom:6rem!important;}
+.block-container {padding-bottom:8rem!important;max-width:100vw!important;}
 #MainMenu, footer, header, [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"], .stDeployButton {display:none!important;visibility:hidden!important;}
 @media(max-width:768px){
   html,body,.stApp,[class*="css"]{font-size:15px!important;}
   h1{font-size:25px!important;line-height:1.2!important;margin-bottom:.4rem!important;}
   h2,h3{font-size:20px!important;}
-  .block-container{padding:1rem 1rem 6rem 1rem!important;}
+  .block-container{padding:1rem 1rem 8rem 1rem!important;max-width:100vw!important;}
 }
 </style>
 """, unsafe_allow_html=True)
@@ -149,9 +160,27 @@ def _get_gspread_client():
     return gspread.authorize(creds)
 
 def get_spreadsheet(): return _google_api_retry(lambda: _get_gspread_client().open_by_key(SHEET_KEY))
+def _norm_ws_title(name):
+    return re.sub(r"\s+", "", str(name or "")).lower()
+
 def get_or_create_ws(ss, title, rows=1000, cols=20):
-    try: return _google_api_retry(lambda: ss.worksheet(title))
-    except Exception: return _google_api_retry(lambda: ss.add_worksheet(title=title, rows=rows, cols=cols))
+    # Dò danh sách worksheet trước để tránh lỗi: A sheet with the name already exists.
+    wanted = _norm_ws_title(title)
+    worksheets = _google_api_retry(lambda: ss.worksheets())
+    for ws in worksheets:
+        if _norm_ws_title(ws.title) == wanted:
+            return ws
+
+    try:
+        return _google_api_retry(lambda: ss.add_worksheet(title=title, rows=rows, cols=cols))
+    except Exception as e:
+        msg = str(e).lower()
+        if "already exists" in msg or "sheet with the name" in msg:
+            worksheets = _google_api_retry(lambda: ss.worksheets())
+            for ws in worksheets:
+                if _norm_ws_title(ws.title) == wanted:
+                    return ws
+        raise
 
 def ensure_header(ws, headers):
     cur = _google_api_retry(lambda: ws.row_values(1))
