@@ -53,50 +53,29 @@ LOCATIONS = {
 }
 LOCATION_BY_CODE = {v["code"]: k for k, v in LOCATIONS.items()}
 
-st.set_page_config(page_title="Điểm danh giảng viên", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Điểm danh giảng viên", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
-html, body, .stApp, .main, [data-testid="stAppViewContainer"] {
-    max-width: 100vw !important;
-    overflow-x: hidden !important;
-}
-.block-container {
-    width: 100% !important;
-    max-width: 100% !important;
-    padding: 1rem 1rem 8rem 1rem !important;
-    box-sizing: border-box !important;
-}
-[data-testid="column"] {
-    width: 100% !important;
+html, body, .stApp, [class*="css"] {
+    color: #000000 !important;
 }
 h1 {
-    font-size: 2rem !important;
     font-weight: 900 !important;
     line-height: 1.15 !important;
-    margin-bottom: .75rem !important;
 }
 label, p, span, div {
-    color: #000 !important;
+    color: #000000 !important;
 }
 input {
-    font-size: 1.1rem !important;
     font-weight: 700 !important;
-    min-height: 3rem !important;
-}
-.stButton, .stButton > button, div[data-testid="stButton"], div[data-testid="stButton"] > button {
-    width: 100% !important;
-    max-width: 100% !important;
-    box-sizing: border-box !important;
+    color: #000000 !important;
 }
 .stButton > button, div[data-testid="stButton"] > button, button[kind="primary"] {
-    min-height: 3.4rem !important;
-    font-size: 1.1rem !important;
     font-weight: 900 !important;
     white-space: normal !important;
     overflow: visible !important;
     text-align: center !important;
-    margin: .25rem 0 1rem 0 !important;
 }
 #MainMenu, footer, header,
 [data-testid="stToolbar"],
@@ -106,14 +85,39 @@ input {
     display: none !important;
     visibility: hidden !important;
 }
+
+/* Chỉ tối ưu mạnh cho màn hình điện thoại khi GV quét QR */
 @media (max-width: 768px) {
+    html, body, .stApp, .main, [data-testid="stAppViewContainer"] {
+        max-width: 100vw !important;
+        overflow-x: hidden !important;
+    }
     .block-container {
-        padding-left: .85rem !important;
-        padding-right: .85rem !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        padding-top: 0.8rem !important;
+        padding-left: 0.85rem !important;
+        padding-right: 0.85rem !important;
         padding-bottom: 9rem !important;
+        box-sizing: border-box !important;
     }
     h1 {
         font-size: 1.85rem !important;
+        margin-bottom: 0.2rem !important;
+    }
+    input {
+        font-size: 1.05rem !important;
+        min-height: 3rem !important;
+    }
+    .stButton, .stButton > button, div[data-testid="stButton"], div[data-testid="stButton"] > button {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+    .stButton > button, div[data-testid="stButton"] > button, button[kind="primary"] {
+        min-height: 3.4rem !important;
+        font-size: 1.05rem !important;
+        margin: .25rem 0 1rem 0 !important;
     }
     [data-testid="stAlert"] {
         font-size: 1rem !important;
