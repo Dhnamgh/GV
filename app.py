@@ -143,6 +143,56 @@ section[data-testid="stSidebar"] * {
 """, unsafe_allow_html=True)
 
 
+
+# ===================== CSS MÀN HÌNH ĐIỆN THOẠI CHO GIẢNG VIÊN =====================
+st.markdown("""
+<style>
+@media (max-width: 768px) {
+    html, body, .stApp, [class*="css"] {
+        font-size: 16px !important;
+    }
+    h1 {
+        font-size: 26px !important;
+        line-height: 1.2 !important;
+        margin-bottom: 0.4rem !important;
+    }
+    h2, h3 {
+        font-size: 20px !important;
+        line-height: 1.25 !important;
+    }
+    label {
+        font-size: 16px !important;
+    }
+    input, textarea {
+        font-size: 16px !important;
+        min-height: 44px !important;
+    }
+    button {
+        font-size: 16px !important;
+        min-height: 46px !important;
+    }
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 5rem !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+    [data-testid="stCaptionContainer"] {
+        font-size: 13px !important;
+    }
+}
+#MainMenu, footer, header,
+[data-testid="stToolbar"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+.stDeployButton {
+    display: none !important;
+    visibility: hidden !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 # ===================== NGÀY THÁNG =====================
 def now_vn():
     return datetime.datetime.now(VN_TZ)
@@ -462,14 +512,14 @@ def render_location_check(campus_code: str):
         st.stop()
 
     campus = LOCATIONS[campus_name]
-    st.info(f"Cơ sở điểm danh: {campus_name} - {campus['address']}")
+    st.info(f"Cơ sở: {campus_name}")
 
     if streamlit_geolocation is None or geodesic is None:
         st.error("Ứng dụng chưa cài đủ thư viện kiểm tra vị trí. Cần cài streamlit-geolocation và geopy.")
         st.code("pip install streamlit-geolocation geopy")
         st.stop()
 
-    st.caption("Vui lòng cho phép trình duyệt truy cập vị trí để xác thực điểm danh.")
+    st.caption("Cho phép truy cập vị trí để xác thực điểm danh.")
     location = streamlit_geolocation()
 
     if not location:
@@ -487,7 +537,7 @@ def render_location_check(campus_code: str):
     campus_loc = (campus["lat"], campus["lon"])
     distance = geodesic(staff_loc, campus_loc).meters
 
-    st.caption(f"Khoảng cách đến cơ sở: {distance:.0f} m. Phạm vi cho phép: {campus['radius']} m.")
+    # Không hiển thị khoảng cách chi tiết trên điện thoại để giao diện gọn hơn.
 
     if distance > campus["radius"]:
         st.error(f"Bạn đang ngoài phạm vi điểm danh của {campus_name}.")
@@ -680,7 +730,7 @@ def render_gv_attendance():
     st.title("Điểm danh giảng viên")
 
     if today_date().weekday() == 6:
-        st.error("Hôm nay là Chủ nhật, hệ thống không mở điểm danh.")
+        st.error("Chủ nhật không mở điểm danh.")
         st.stop()
 
     campus_name = LOCATION_BY_CODE.get(campus_code)
@@ -688,21 +738,20 @@ def render_gv_attendance():
         st.error("Cơ sở điểm danh không hợp lệ.")
         st.stop()
 
-    st.info(f"Ngày điểm danh: {today_header()}")
-    st.info(f"Sheet tháng: {month_sheet_name()}")
+    st.info(f"Ngày: {today_header()}")
 
     render_location_check(campus_code)
 
     msgv_suffix = st.text_input(
-        "Nhập 4 số cuối MSGV",
-        placeholder="Ví dụ: 1234",
+        "4 số cuối MSGV",
+        placeholder="VD: 1234",
         max_chars=4,
-        help=f"Mã đầy đủ sẽ là {MSGV_PREFIX} + 4 số cuối bạn nhập",
+        help=None,
     )
-    hoten = st.text_input("Nhập họ và tên")
+    hoten = st.text_input("Họ và tên", placeholder="Nhập họ và tên như trong danh sách")
 
-    if msgv_suffix.strip().isdigit():
-        st.caption(f"MSGV đầy đủ: {MSGV_PREFIX}{msgv_suffix.strip().zfill(4)}")
+    if msgv_suffix.strip().isdigit() and len(msgv_suffix.strip()) == 4:
+        st.caption(f"MSGV: {MSGV_PREFIX}{msgv_suffix.strip().zfill(4)}")
 
     if st.button("Xác nhận điểm danh", type="primary", use_container_width=True):
         if not msgv_suffix.strip().isdigit() or len(msgv_suffix.strip()) != 4:
@@ -734,14 +783,14 @@ def render_gv_attendance():
             current_value = (_google_api_retry(lambda: ws.cell(staff_cell.row, today_col)).value or "").strip()
             if current_value:
                 hour, campus = parse_attendance_value(current_value)
-                st.info(f"MSGV {msgv_full} đã điểm danh ngày {today_header()} lúc {hour} tại {campus}.")
+                st.info(f"MSGV {msgv_full} đã điểm danh lúc {hour} tại {campus}.")
                 st.stop()
 
             time_str = now_vn().strftime("%H:%M:%S")
             value = attendance_value(time_str, campus_name)
             _google_api_retry(lambda: ws.update_cell(staff_cell.row, today_col, value))
 
-            st.success(f"Điểm danh thành công! MSGV {msgv_full}, ngày {today_header()}, lúc {time_str}, tại {campus_name}.")
+            st.success(f"Điểm danh thành công!\n\nMSGV: {msgv_full}\n\nGiờ: {time_str}\n\nCơ sở: {campus_name}")
 
         except Exception as e:
             st.error(f"Lỗi khi điểm danh: {e}")
