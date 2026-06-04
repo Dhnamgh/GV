@@ -50,14 +50,14 @@ LOCATIONS = {
         "code": "CS1",
         "lat": 10.754665,
         "lon": 106.663381,
-        "radius": 500,
+        "radius": 100,
         "address": "217 Hồng Bàng, Phường Chợ Lớn, TP.HCM",
     },
     "Cơ sở 2 - Đinh Tiên Hoàng": {
         "code": "CS2",
         "lat": 10.785434,
         "lon": 106.702667,
-        "radius": 400,
+        "radius": 100,
         "address": "43 Đinh Tiên Hoàng, Phường Sài Gòn, TP.HCM",
     },
 }
