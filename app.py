@@ -46,19 +46,19 @@ STAFF_COLUMNS = ["MSGV", "Họ và tên", "Đơn vị", "Bộ môn"]
 LOG_COLUMNS = ["Ngày", "MSGV", "Họ và tên", "Đơn vị", "Bộ môn", "CS", "Ca", "IN/OUT", "Giờ", "Timestamp"]
 
 LOCATIONS = {
-    "Cơ sở 1 - Hồng Bàng": {
+    "Cơ sở 1: 217 Hồng Bàng": {
         "code": "CS1",
         "lat": 10.754665,
         "lon": 106.663381,
         "radius": 100,
         "address": "217 Hồng Bàng, Phường Chợ Lớn, TP.HCM",
     },
-    "Cơ sở 2 - Đinh Tiên Hoàng": {
+    "Cơ sở 2: 41-43 Đinh Tiên Hoàng": {
         "code": "CS2",
         "lat": 10.785434,
         "lon": 106.702667,
         "radius": 100,
-        "address": "43 Đinh Tiên Hoàng, Phường Sài Gòn, TP.HCM",
+        "address": "41-43 Đinh Tiên Hoàng, Phường Sài Gòn, TP.HCM",
     },
 }
 LOCATION_BY_CODE = {v["code"]: k for k, v in LOCATIONS.items()}
