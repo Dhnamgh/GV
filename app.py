@@ -896,6 +896,11 @@ def render_tab_stats():
     df["Ngày_chuẩn"] = df["Ngày"].apply(normalize_date_value)
     df["Ngày_dt"] = df["Ngày"].apply(parse_date_value)
     df["Bộ môn - Đơn vị"] = df.apply(group_bo_mon_don_vi, axis=1)
+    if "Vào muộn phút" not in df.columns:
+        df["Vào muộn phút"] = 0
+    if "Số tiết" not in df.columns:
+        df["Số tiết"] = 0
+
     df["Vào muộn phút"] = pd.to_numeric(df["Vào muộn phút"], errors="coerce").fillna(0)
     df["Số tiết"] = pd.to_numeric(df["Số tiết"], errors="coerce").fillna(0)
 
@@ -934,6 +939,11 @@ def render_tab_stats():
     summary = summarize_hours(filtered.to_dict("records"))
 
     if not summary.empty:
+        if "Số tiết" not in summary.columns:
+            summary["Số tiết"] = 0
+        if "Vào muộn phút" not in summary.columns:
+            summary["Vào muộn phút"] = 0
+
         summary["Bộ môn - Đơn vị"] = summary.apply(group_bo_mon_don_vi, axis=1)
         summary["Số tiết"] = pd.to_numeric(summary["Số tiết"], errors="coerce").fillna(0)
         summary["Vào muộn phút"] = pd.to_numeric(summary["Vào muộn phút"], errors="coerce").fillna(0)
