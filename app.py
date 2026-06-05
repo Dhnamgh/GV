@@ -38,6 +38,22 @@ VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
 LESSON_MINUTES = int(st.secrets.get("LESSON_MINUTES", 50))
 BREAK_AFTER_LESSONS = int(st.secrets.get("BREAK_AFTER_LESSONS", 3))
 BREAK_MINUTES = int(st.secrets.get("BREAK_MINUTES", 15))
+LATE_THRESHOLD_MINUTES = int(st.secrets.get("LATE_THRESHOLD_MINUTES", 15))
+
+LESSON_SCHEDULE = {
+    1: ("07:00", "07:50"),
+    2: ("07:50", "08:40"),
+    3: ("08:40", "09:30"),
+    4: ("09:45", "10:35"),
+    5: ("10:35", "11:25"),
+    7: ("13:00", "13:50"),
+    8: ("13:50", "14:40"),
+    9: ("14:40", "15:30"),
+    10: ("15:45", "16:35"),
+    11: ("16:35", "17:25"),
+}
+MORNING_LESSONS = [1, 2, 3, 4, 5]
+AFTERNOON_LESSONS = [7, 8, 9, 10, 11]
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -45,7 +61,7 @@ SCOPES = [
 ]
 
 STAFF_COLUMNS = ["MSGV", "Họ và tên", "Đơn vị", "Bộ môn"]
-LOG_COLUMNS = ["Ngày", "MSGV", "Họ và tên", "Đơn vị", "Bộ môn", "CS", "Ca", "Số tiết", "IN/OUT", "Giờ", "Timestamp"]
+LOG_COLUMNS = ["Ngày", "MSGV", "Họ và tên", "Đơn vị", "Bộ môn", "CS", "Ca", "Tiết từ", "Tiết đến", "Số tiết", "Giờ bắt đầu phân công", "Giờ kết thúc phân công", "Vào muộn phút", "IN/OUT", "Giờ", "Timestamp"]
 
 LOCATIONS = {
     "Cơ sở 1: 217 Hồng Bàng": {
@@ -275,6 +291,57 @@ def minutes_since_time(t_obj):
     now = now_vn()
     start = datetime.datetime.combine(today_date(), t_obj, tzinfo=VN_TZ)
     return (now - start).total_seconds() / 60
+
+
+
+def time_hhmm_to_time(s):
+    return datetime.datetime.strptime(str(s), "%H:%M").time()
+
+
+def time_hhmm_to_minutes(s):
+    t = time_hhmm_to_time(s)
+    return t.hour * 60 + t.minute
+
+
+def assigned_lessons_for_shift(shift):
+    return MORNING_LESSONS if shift == "Sáng" else AFTERNOON_LESSONS
+
+
+def lesson_range_info(shift, lesson_from, lesson_to):
+    allowed = assigned_lessons_for_shift(shift)
+    lesson_from = int(lesson_from)
+    lesson_to = int(lesson_to)
+    if lesson_from not in allowed:
+        lesson_from = allowed[0]
+    if lesson_to not in allowed:
+        lesson_to = allowed[-1]
+    if lesson_to < lesson_from:
+        lesson_to = lesson_from
+    selected = [x for x in allowed if lesson_from <= x <= lesson_to]
+    start_time = LESSON_SCHEDULE[selected[0]][0]
+    end_time = LESSON_SCHEDULE[selected[-1]][1]
+    return {
+        "lesson_from": selected[0],
+        "lesson_to": selected[-1],
+        "num_lessons": len(selected),
+        "start_time": start_time,
+        "end_time": end_time,
+        "required_minutes": time_hhmm_to_minutes(end_time) - time_hhmm_to_minutes(start_time),
+    }
+
+
+def late_minutes_against_assigned_start(assigned_start):
+    start_t = time_hhmm_to_time(assigned_start)
+    start_dt = datetime.datetime.combine(today_date(), start_t, tzinfo=VN_TZ)
+    diff = int((now_vn() - start_dt).total_seconds() // 60)
+    return max(0, diff)
+
+
+def academic_year_range(ref_date=None):
+    if ref_date is None:
+        ref_date = today_date()
+    start_year = ref_date.year if ref_date >= datetime.date(ref_date.year, 7, 1) else ref_date.year - 1
+    return datetime.date(start_year, 7, 1), datetime.date(start_year + 1, 8, 31)
 
 
 def required_minutes_for_lessons(num_lessons):
@@ -672,17 +739,18 @@ def render_gv_attendance():
     action_label = st.radio("Chọn loại điểm danh", ["Vào ca", "Ra ca"], horizontal=True)
     action = "IN" if action_label == "Vào ca" else "OUT"
 
-    so_tiet = st.number_input(
-        "Số tiết trong ca",
-        min_value=1,
-        max_value=5,
-        value=2,
-        step=1,
-        help="Mỗi tiết 50 phút. Nếu trên 3 tiết, hệ thống cộng 15 phút nghỉ giải lao sau tiết 3.",
-    )
+    lessons_allowed = assigned_lessons_for_shift(shift)
+    col_from, col_to = st.columns(2)
+    with col_from:
+        tiet_tu = st.number_input("Tiết dạy từ", min_value=min(lessons_allowed), max_value=max(lessons_allowed), value=min(lessons_allowed), step=1)
+    with col_to:
+        tiet_den = st.number_input("Đến tiết", min_value=min(lessons_allowed), max_value=max(lessons_allowed), value=min(lessons_allowed), step=1)
 
-    required_minutes = required_minutes_for_lessons(so_tiet)
-    st.caption(f"Thời gian tối thiểu trong ca: {required_minutes} phút.")
+    info_tiet = lesson_range_info(shift, tiet_tu, tiet_den)
+    st.caption(
+        f"Phân công: tiết {info_tiet['lesson_from']} đến tiết {info_tiet['lesson_to']} "
+        f"({info_tiet['num_lessons']} tiết), từ {info_tiet['start_time']} đến {info_tiet['end_time']}."
+    )
 
     msgv_input = st.text_input("MSGV", placeholder="Nhập đủ 8 số MSGV", max_chars=8)
     if msgv_input.strip().isdigit() and len(msgv_input.strip()) == 8:
@@ -712,6 +780,14 @@ def render_gv_attendance():
                 st.info(f"MSGV {msgv_full} đã vào ca {shift} và chưa ra ca. Hệ thống không ghi trùng.")
                 st.stop()
 
+        if action == "IN":
+            late_min = late_minutes_against_assigned_start(info_tiet["start_time"])
+            if late_min > 0:
+                if late_min > LATE_THRESHOLD_MINUTES:
+                    st.warning(f"Bạn vào ca muộn {late_min} phút so với tiết được phân công.")
+                else:
+                    st.info(f"Bạn vào ca muộn {late_min} phút so với tiết được phân công.")
+
         if action == "OUT":
             session_key = f"close_{today_str()}_{msgv_full}_{shift}_{len(current_logs)}"
 
@@ -728,22 +804,14 @@ def render_gv_attendance():
                 st.warning("Không đọc được giờ vào ca. Vui lòng liên hệ quản trị để kiểm tra dữ liệu Log.")
                 st.stop()
 
-            # Ưu tiên số tiết đã ghi ở lần Vào ca; nếu log cũ chưa có thì dùng số tiết đang nhập.
-            lessons_from_log = safe_str(open_in.get("Số tiết"))
-            if lessons_from_log.isdigit():
-                lessons_required = int(lessons_from_log)
-            else:
-                lessons_required = int(so_tiet)
-
-            required_minutes_out = required_minutes_for_lessons(lessons_required)
-            elapsed_minutes = minutes_since_time(parsed)
-
-            if elapsed_minutes < required_minutes_out:
-                remain = int(required_minutes_out - elapsed_minutes + 0.999)
+            assigned_end = safe_str(open_in.get("Giờ kết thúc phân công")) or info_tiet["end_time"]
+            assigned_end_min = time_hhmm_to_minutes(assigned_end)
+            now_minutes = now_vn().hour * 60 + now_vn().minute
+            if now_minutes < assigned_end_min:
+                remain = assigned_end_min - now_minutes
                 st.warning(
-                    f"Chưa đủ thời gian tối thiểu để ra ca. "
-                    f"Ca này có {lessons_required} tiết, cần đủ {required_minutes_out} phút kể từ lúc vào ca; "
-                    f"còn khoảng {remain} phút."
+                    f"Chưa đến thời điểm ra ca theo tiết được phân công. "
+                    f"Ca này kết thúc lúc {assigned_end}; còn khoảng {remain} phút."
                 )
                 st.stop()
 
@@ -756,7 +824,12 @@ def render_gv_attendance():
             "Bộ môn": staff.get("Bộ môn", ""),
             "CS": campus_code,
             "Ca": shift,
-            "Số tiết": int(so_tiet),
+            "Tiết từ": info_tiet["lesson_from"],
+            "Tiết đến": info_tiet["lesson_to"],
+            "Số tiết": info_tiet["num_lessons"],
+            "Giờ bắt đầu phân công": info_tiet["start_time"],
+            "Giờ kết thúc phân công": info_tiet["end_time"],
+            "Vào muộn phút": late_minutes_against_assigned_start(info_tiet["start_time"]) if action == "IN" else "",
             "IN/OUT": action,
             "Giờ": t,
             "Timestamp": timestamp_str(),
@@ -771,7 +844,8 @@ def render_gv_attendance():
         st.success(f"{action_label} thành công!")
         st.write(f"MSGV: **{msgv_full}**")
         st.write(f"Ca: **{shift}**")
-        st.write(f"Số tiết: **{int(so_tiet)}**")
+        st.write(f"Tiết phân công: **{info_tiet['lesson_from']} - {info_tiet['lesson_to']}**")
+        st.write(f"Số tiết: **{info_tiet['num_lessons']}**")
         st.write(f"Giờ: **{t}**")
         st.write(f"Cơ sở: **{campus_code}**")
 
@@ -822,10 +896,12 @@ def render_tab_stats():
     df["Ngày_chuẩn"] = df["Ngày"].apply(normalize_date_value)
     df["Ngày_dt"] = df["Ngày"].apply(parse_date_value)
     df["Bộ môn - Đơn vị"] = df.apply(group_bo_mon_don_vi, axis=1)
+    df["Vào muộn phút"] = pd.to_numeric(df["Vào muộn phút"], errors="coerce").fillna(0)
+    df["Số tiết"] = pd.to_numeric(df["Số tiết"], errors="coerce").fillna(0)
 
     mode = st.radio(
         "Chọn phạm vi thống kê",
-        ["Theo ngày", "Theo tuần hiện hành", "Theo tháng hiện hành"],
+        ["Theo ngày", "Theo tuần hiện hành", "Theo tháng hiện hành", "Theo năm học hiện hành"],
         horizontal=True,
         index=0,
     )
@@ -836,39 +912,43 @@ def render_tab_stats():
         selected = st.selectbox("Chọn ngày", valid_dates, index=default_idx if valid_dates else 0)
         filtered = df[df["Ngày_chuẩn"] == selected].copy()
         title_scope = f"ngày {selected}"
-
     elif mode == "Theo tuần hiện hành":
         start, end = current_week_range()
         filtered = df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy()
         title_scope = f"tuần hiện hành ({start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})"
-
-    else:
+    elif mode == "Theo tháng hiện hành":
         start, end = current_month_range()
         filtered = df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy()
         title_scope = f"tháng hiện hành ({start.strftime('%m/%Y')})"
+    else:
+        start, end = academic_year_range()
+        filtered = df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy()
+        title_scope = f"năm học hiện hành ({start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})"
 
     st.metric("Số lượt log", len(filtered))
-
     if filtered.empty:
         st.info(f"Chưa có dữ liệu trong {title_scope}.")
         return
 
     st.dataframe(filtered.drop(columns=["Ngày_dt"], errors="ignore"), use_container_width=True)
-
     summary = summarize_hours(filtered.to_dict("records"))
+
     if not summary.empty:
         summary["Bộ môn - Đơn vị"] = summary.apply(group_bo_mon_don_vi, axis=1)
+        summary["Số tiết"] = pd.to_numeric(summary["Số tiết"], errors="coerce").fillna(0)
+        summary["Vào muộn phút"] = pd.to_numeric(summary["Vào muộn phút"], errors="coerce").fillna(0)
 
         st.subheader("Tổng hợp giờ có mặt")
         st.dataframe(summary, use_container_width=True)
 
-        st.subheader(f"Thống kê theo Bộ môn - Đơn vị trong {title_scope}")
+        st.subheader(f"Thống kê số tiết theo Bộ môn - Đơn vị trong {title_scope}")
         dept_summary = (
             summary.groupby("Bộ môn - Đơn vị", dropna=False)
             .agg(
                 Số_giảng_viên=("MSGV", "nunique"),
-                Số_ca_có_dữ_liệu=("MSGV", "count"),
-                Tổng_giờ_có_mặt=("Giờ có mặt", lambda s: round(pd.to_numeric(s, errors="coerce").fillna(0).sum(), 2))
+                Tổng_số_tiết=("Số tiết", "sum"),
+                Tổng_giờ_có_mặt=("Giờ có mặt", lambda s: round(pd.to_numeric(s, errors="coerce").fillna(0).sum(), 2)),
+                Số_lượt_vào_muộn_trên_15_phút=("Vào muộn phút", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0) > LATE_THRESHOLD_MINUTES).sum())),
             )
             .reset_index()
         )
@@ -876,11 +956,21 @@ def render_tab_stats():
 
         chart = alt.Chart(dept_summary).mark_bar().encode(
             x=alt.X("Bộ môn - Đơn vị:N", title="Bộ môn - Đơn vị", sort="-y"),
-            y=alt.Y("Tổng_giờ_có_mặt:Q", title="Tổng giờ có mặt"),
+            y=alt.Y("Tổng_số_tiết:Q", title="Tổng số tiết"),
             color=alt.Color("Bộ môn - Đơn vị:N", title="Bộ môn - Đơn vị"),
-            tooltip=["Bộ môn - Đơn vị", "Số_giảng_viên", "Số_ca_có_dữ_liệu", "Tổng_giờ_có_mặt"],
+            tooltip=["Bộ môn - Đơn vị", "Số_giảng_viên", "Tổng_số_tiết", "Tổng_giờ_có_mặt", "Số_lượt_vào_muộn_trên_15_phút"],
         ).properties(height=360)
         st.altair_chart(chart, use_container_width=True)
+
+        st.subheader(f"Giảng viên vào ca trễ trên {LATE_THRESHOLD_MINUTES} phút trong {title_scope}")
+        late_df = summary[summary["Vào muộn phút"] > LATE_THRESHOLD_MINUTES].copy()
+        if late_df.empty:
+            st.success("Không có giảng viên vào ca trễ trên ngưỡng.")
+        else:
+            st.dataframe(
+                late_df[["Ngày", "MSGV", "Họ và tên", "Đơn vị", "Bộ môn", "Ca", "Vào ca", "Vào muộn phút", "Số tiết"]],
+                use_container_width=True,
+            )
 
 
 def render_tab_setup():
