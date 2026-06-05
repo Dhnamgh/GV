@@ -700,7 +700,7 @@ def render_location_check(campus_code):
         st.error("Ứng dụng chưa cài đủ thư viện kiểm tra vị trí.")
         st.stop()
 
-    st.caption("Cho phép truy cập vị trí để xác thực điểm danh trong phạm vi 100m.")
+    st.caption("Cho phép truy cập vị trí để xác thực điểm danh.")
     loc = streamlit_geolocation()
     if not loc:
         st.warning("Chưa nhận được vị trí. Vui lòng bật định vị và cho phép truy cập vị trí.")
