@@ -560,11 +560,60 @@ def get_all_records_by_header(ws):
     return out
 
 
-def find_staff_by_msgv(msgv_full):
+def find_staff_by_msgv(msgv_input):
+    """
+    Tra cứu GV theo 4 số cuối hoặc đủ 8 số MSGV.
+    Nếu 4 số cuối bị trùng, app sẽ báo để quản trị xử lý.
+    """
     ws = staff_ws()
     values = _google_api_retry(lambda: ws.get_all_values())
     if not values or len(values) < 2:
         return None
+
+    headers = values[0]
+    hn = [norm_header(h) for h in headers]
+
+    def col_index(names, default):
+        wanted = [norm_header(x) for x in names]
+        for i, h in enumerate(hn):
+            if h in wanted:
+                return i
+        return default
+
+    msgv_i = col_index(["MSGV"], 0)
+    name_i = col_index(["Họ và tên", "Ho va ten", "Họ tên", "Ho ten"], 1)
+    unit_i = col_index(["Đơn vị", "Don vi"], 2)
+    dept_i = col_index(["Bộ môn", "Bo mon"], 3)
+
+    target = norm_digits(msgv_input)
+    matches = []
+
+    for row in values[1:]:
+        raw = row[msgv_i] if msgv_i < len(row) else ""
+        raw_digits = norm_digits(raw)
+        if not raw_digits:
+            continue
+
+        match = False
+        if len(target) == 4:
+            match = raw_digits.endswith(target)
+        else:
+            match = raw_digits == target or raw_digits.zfill(len(target)) == target
+
+        if match:
+            matches.append({
+                "MSGV": raw_digits.zfill(8) if len(raw_digits) <= 8 else raw_digits,
+                "Họ và tên": row[name_i] if name_i < len(row) else "",
+                "Đơn vị": row[unit_i] if unit_i < len(row) else "",
+                "Bộ môn": row[dept_i] if dept_i < len(row) else "",
+            })
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        return {"ambiguous": True, "matches": matches}
+    return None
+
 
     headers = values[0]
     hn = [norm_header(h) for h in headers]
@@ -752,21 +801,27 @@ def render_gv_attendance():
         f"({info_tiet['num_lessons']} tiết), từ {info_tiet['start_time']} đến {info_tiet['end_time']}."
     )
 
-    msgv_input = st.text_input("MSGV", placeholder="Nhập đủ 8 số MSGV", max_chars=8)
-    if msgv_input.strip().isdigit() and len(msgv_input.strip()) == 8:
-        st.caption(f"MSGV: {msgv_input.strip()}")
+    msgv_suffix = st.text_input("4 số cuối MSGV", placeholder="VD: 1234", max_chars=4)
+    if msgv_suffix.strip().isdigit() and len(msgv_suffix.strip()) == 4:
+        st.caption(f"4 số cuối MSGV: {msgv_suffix.strip()}")
 
     if st.button("Xác nhận điểm danh", type="primary", use_container_width=True):
-        if not msgv_input.strip().isdigit() or len(msgv_input.strip()) != 8:
-            st.warning("Vui lòng nhập đúng 8 số MSGV.")
+        if not msgv_suffix.strip().isdigit() or len(msgv_suffix.strip()) != 4:
+            st.warning("Vui lòng nhập đúng 4 số cuối MSGV.")
             st.stop()
 
-        msgv_full = msgv_input.strip()
+        msgv_full = msgv_suffix.strip()
         staff = find_staff_by_msgv(msgv_full)
 
         if not staff:
-            st.error(f"Không tìm thấy MSGV {msgv_full}.")
+            st.error(f"Không tìm thấy MSGV có 4 số cuối {msgv_full}.")
             st.stop()
+
+        if staff.get("ambiguous"):
+            st.error("4 số cuối MSGV bị trùng với nhiều giảng viên. Vui lòng liên hệ quản trị để kiểm tra danh sách.")
+            st.stop()
+
+        msgv_full = staff.get("MSGV", msgv_full)
 
         current_logs = logs_for_msgv_today(msgv_full)
         open_in = latest_open_in_log(current_logs, shift)
@@ -868,11 +923,16 @@ def render_tab_qr():
 
 def render_tab_search():
     st.subheader("Tìm kiếm giảng viên")
-    q = st.text_input("Nhập MSGV hoặc họ tên")
+    q = st.text_input("Nhập 4 số cuối MSGV, MSGV đầy đủ hoặc họ tên")
     if st.button("Tìm", use_container_width=True):
         rows = get_all_records_by_header(staff_ws())
         if q.isdigit():
-            rows = [r for r in rows if norm_digits(r.get("MSGV")) == q or norm_digits(r.get("MSGV")).zfill(len(q)) == q]
+            rows = [
+                r for r in rows
+                if norm_digits(r.get("MSGV")) == q
+                or norm_digits(r.get("MSGV")).zfill(len(q)) == q
+                or (len(q) == 4 and norm_digits(r.get("MSGV")).endswith(q))
+            ]
         else:
             rows = [r for r in rows if norm_search(q) in norm_search(r.get("Họ và tên"))]
         if rows:
@@ -881,12 +941,30 @@ def render_tab_search():
             st.warning("Không tìm thấy kết quả phù hợp.")
 
 
-def render_tab_stats():
-    st.subheader("Thống kê theo Bộ môn - Đơn vị")
+
+def current_period_filter(df, mode, selected_date=None):
+    if mode == "Theo ngày":
+        valid_dates = sorted([d for d in df["Ngày_chuẩn"].dropna().astype(str).unique() if d])
+        if selected_date is None:
+            selected_date = today_str() if today_str() in valid_dates else (valid_dates[-1] if valid_dates else today_str())
+        return df[df["Ngày_chuẩn"] == selected_date].copy(), f"ngày {selected_date}"
+
+    if mode == "Theo tuần hiện hành":
+        start, end = current_week_range()
+        return df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy(), f"tuần hiện hành ({start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})"
+
+    if mode == "Theo tháng hiện hành":
+        start, end = current_month_range()
+        return df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy(), f"tháng hiện hành ({start.strftime('%m/%Y')})"
+
+    start, end = academic_year_range()
+    return df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy(), f"năm học hiện hành ({start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})"
+
+
+def prepare_log_dataframe():
     logs = load_logs()
     if not logs:
-        st.info("Chưa có dữ liệu điểm danh.")
-        return
+        return pd.DataFrame()
 
     df = pd.DataFrame(logs)
     for c in LOG_COLUMNS:
@@ -896,13 +974,65 @@ def render_tab_stats():
     df["Ngày_chuẩn"] = df["Ngày"].apply(normalize_date_value)
     df["Ngày_dt"] = df["Ngày"].apply(parse_date_value)
     df["Bộ môn - Đơn vị"] = df.apply(group_bo_mon_don_vi, axis=1)
-    if "Vào muộn phút" not in df.columns:
-        df["Vào muộn phút"] = 0
-    if "Số tiết" not in df.columns:
-        df["Số tiết"] = 0
-
     df["Vào muộn phút"] = pd.to_numeric(df["Vào muộn phút"], errors="coerce").fillna(0)
     df["Số tiết"] = pd.to_numeric(df["Số tiết"], errors="coerce").fillna(0)
+    return df
+
+
+def compute_dashboard(filtered):
+    if filtered.empty:
+        return {"Tổng GV có log": 0, "Đang trong ca": 0, "Đã ra ca": 0, "Vào muộn > 15 phút": 0, "Tổng tiết phân công": 0}
+
+    total_gv = filtered["MSGV"].nunique()
+    out_count = int((filtered["IN/OUT"].astype(str).str.upper() == "OUT").sum())
+    in_df = filtered[filtered["IN/OUT"].astype(str).str.upper() == "IN"].copy()
+    late_count = int((pd.to_numeric(in_df.get("Vào muộn phút", pd.Series(dtype=float)), errors="coerce").fillna(0) > LATE_THRESHOLD_MINUTES).sum())
+    total_lessons = int(pd.to_numeric(in_df.get("Số tiết", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+
+    open_count = 0
+    for (msgv, ca), g in filtered.groupby(["MSGV", "Ca"], dropna=False):
+        num_in = (g["IN/OUT"].astype(str).str.upper() == "IN").sum()
+        num_out = (g["IN/OUT"].astype(str).str.upper() == "OUT").sum()
+        if num_in > num_out:
+            open_count += 1
+
+    return {
+        "Tổng GV có log": int(total_gv),
+        "Đang trong ca": int(open_count),
+        "Đã ra ca": out_count,
+        "Vào muộn > 15 phút": late_count,
+        "Tổng tiết phân công": total_lessons,
+    }
+
+
+def build_violation_report(summary):
+    rows = []
+    if summary is None or summary.empty:
+        return pd.DataFrame()
+
+    for _, r in summary.iterrows():
+        row = r.to_dict()
+        late = float(pd.to_numeric(pd.Series([r.get("Vào muộn phút", 0)]), errors="coerce").fillna(0).iloc[0])
+        if not safe_str(r.get("Vào ca")):
+            rows.append({**row, "Loại vi phạm": "Không vào ca"})
+        if safe_str(r.get("Vào ca")) and not safe_str(r.get("Ra ca")):
+            rows.append({**row, "Loại vi phạm": "Không ra ca"})
+        if late > LATE_THRESHOLD_MINUTES:
+            rows.append({**row, "Loại vi phạm": f"Vào ca muộn > {LATE_THRESHOLD_MINUTES} phút"})
+    return pd.DataFrame(rows)
+
+
+def dataframe_to_csv_bytes(df):
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+
+def render_tab_stats():
+    st.subheader("Thống kê theo Bộ môn - Đơn vị")
+    df = prepare_log_dataframe()
+    if df.empty:
+        st.info("Chưa có dữ liệu điểm danh.")
+        return
 
     mode = st.radio(
         "Chọn phạm vi thống kê",
@@ -911,31 +1041,30 @@ def render_tab_stats():
         index=0,
     )
 
+    selected = None
     if mode == "Theo ngày":
         valid_dates = sorted([d for d in df["Ngày_chuẩn"].dropna().astype(str).unique() if d])
         default_idx = valid_dates.index(today_str()) if today_str() in valid_dates else len(valid_dates) - 1
         selected = st.selectbox("Chọn ngày", valid_dates, index=default_idx if valid_dates else 0)
-        filtered = df[df["Ngày_chuẩn"] == selected].copy()
-        title_scope = f"ngày {selected}"
-    elif mode == "Theo tuần hiện hành":
-        start, end = current_week_range()
-        filtered = df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy()
-        title_scope = f"tuần hiện hành ({start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})"
-    elif mode == "Theo tháng hiện hành":
-        start, end = current_month_range()
-        filtered = df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy()
-        title_scope = f"tháng hiện hành ({start.strftime('%m/%Y')})"
-    else:
-        start, end = academic_year_range()
-        filtered = df[(df["Ngày_dt"] >= start) & (df["Ngày_dt"] <= end)].copy()
-        title_scope = f"năm học hiện hành ({start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})"
 
-    st.metric("Số lượt log", len(filtered))
+    filtered, title_scope = current_period_filter(df, mode, selected)
+    st.markdown(f"**Phạm vi:** {title_scope}")
+
+    dash = compute_dashboard(filtered)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Tổng GV", dash["Tổng GV có log"])
+    c2.metric("Đang trong ca", dash["Đang trong ca"])
+    c3.metric("Đã ra ca", dash["Đã ra ca"])
+    c4.metric("Vào muộn", dash["Vào muộn > 15 phút"])
+    c5.metric("Tổng tiết", dash["Tổng tiết phân công"])
+
     if filtered.empty:
         st.info(f"Chưa có dữ liệu trong {title_scope}.")
         return
 
+    st.subheader("Dữ liệu log")
     st.dataframe(filtered.drop(columns=["Ngày_dt"], errors="ignore"), use_container_width=True)
+
     summary = summarize_hours(filtered.to_dict("records"))
 
     if not summary.empty:
@@ -950,6 +1079,13 @@ def render_tab_stats():
 
         st.subheader("Tổng hợp giờ có mặt")
         st.dataframe(summary, use_container_width=True)
+        st.download_button(
+            "Tải báo cáo tổng hợp CSV",
+            data=dataframe_to_csv_bytes(summary),
+            file_name=f"bao_cao_tong_hop_{today_iso()}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
         st.subheader(f"Thống kê số tiết theo Bộ môn - Đơn vị trong {title_scope}")
         dept_summary = (
@@ -972,7 +1108,29 @@ def render_tab_stats():
         ).properties(height=360)
         st.altair_chart(chart, use_container_width=True)
 
-        st.subheader(f"Giảng viên vào ca trễ trên {LATE_THRESHOLD_MINUTES} phút trong {title_scope}")
+        st.download_button(
+            "Tải thống kê Bộ môn - Đơn vị CSV",
+            data=dataframe_to_csv_bytes(dept_summary),
+            file_name=f"thong_ke_bo_mon_don_vi_{today_iso()}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        st.subheader("Báo cáo vi phạm giờ giảng")
+        violations = build_violation_report(summary)
+        if violations.empty:
+            st.success("Không có vi phạm trong phạm vi đang chọn.")
+        else:
+            st.dataframe(violations, use_container_width=True)
+            st.download_button(
+                "Tải báo cáo vi phạm CSV",
+                data=dataframe_to_csv_bytes(violations),
+                file_name=f"bao_cao_vi_pham_{today_iso()}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        st.subheader(f"Giảng viên vào ca trễ trên {LATE_THRESHOLD_MINUTES} phút")
         late_df = summary[summary["Vào muộn phút"] > LATE_THRESHOLD_MINUTES].copy()
         if late_df.empty:
             st.success("Không có giảng viên vào ca trễ trên ngưỡng.")
@@ -981,6 +1139,51 @@ def render_tab_stats():
                 late_df[["Ngày", "MSGV", "Họ và tên", "Đơn vị", "Bộ môn", "Ca", "Vào ca", "Vào muộn phút", "Số tiết"]],
                 use_container_width=True,
             )
+
+
+def render_tab_dashboard():
+    st.subheader("Dashboard tổng hợp")
+    df = prepare_log_dataframe()
+    if df.empty:
+        st.info("Chưa có dữ liệu điểm danh.")
+        return
+
+    mode = st.radio(
+        "Phạm vi dashboard",
+        ["Theo ngày", "Theo tuần hiện hành", "Theo tháng hiện hành", "Theo năm học hiện hành"],
+        horizontal=True,
+        index=0,
+        key="dashboard_mode",
+    )
+
+    selected = None
+    if mode == "Theo ngày":
+        valid_dates = sorted([d for d in df["Ngày_chuẩn"].dropna().astype(str).unique() if d])
+        default_idx = valid_dates.index(today_str()) if today_str() in valid_dates else len(valid_dates) - 1
+        selected = st.selectbox("Chọn ngày", valid_dates, index=default_idx if valid_dates else 0, key="dashboard_date")
+
+    filtered, title_scope = current_period_filter(df, mode, selected)
+    st.markdown(f"**Phạm vi:** {title_scope}")
+
+    dash = compute_dashboard(filtered)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Tổng GV", dash["Tổng GV có log"])
+    c2.metric("Đang trong ca", dash["Đang trong ca"])
+    c3.metric("Đã ra ca", dash["Đã ra ca"])
+    c4.metric("Vào muộn", dash["Vào muộn > 15 phút"])
+    c5.metric("Tổng tiết", dash["Tổng tiết phân công"])
+
+    if filtered.empty:
+        return
+
+    dept = filtered.groupby("Bộ môn - Đơn vị", dropna=False).size().reset_index(name="Số lượt log")
+    chart = alt.Chart(dept).mark_bar().encode(
+        x=alt.X("Bộ môn - Đơn vị:N", sort="-y"),
+        y="Số lượt log:Q",
+        color=alt.Color("Bộ môn - Đơn vị:N", legend=None),
+        tooltip=["Bộ môn - Đơn vị", "Số lượt log"],
+    ).properties(height=360)
+    st.altair_chart(chart, use_container_width=True)
 
 
 def render_tab_setup():
@@ -1013,13 +1216,15 @@ with st.sidebar:
     st.markdown("**Điều hướng**")
     menu = st.radio(
         "Chọn mục",
-        ["Tạo QR cố định", "Tìm kiếm giảng viên", "Thống kê điểm danh", "Cấu trúc dữ liệu"],
+        ["Tạo QR cố định", "Dashboard tổng hợp", "Tìm kiếm giảng viên", "Thống kê điểm danh", "Cấu trúc dữ liệu"],
         index=0,
         label_visibility="collapsed",
     )
 
 if menu == "Tạo QR cố định":
     render_tab_qr()
+elif menu == "Dashboard tổng hợp":
+    render_tab_dashboard()
 elif menu == "Tìm kiếm giảng viên":
     render_tab_search()
 elif menu == "Thống kê điểm danh":
