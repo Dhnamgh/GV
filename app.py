@@ -34,8 +34,10 @@ STAFF_SHEET_NAME = st.secrets.get("STAFF_SHEET_NAME", "NhanSu")
 LOG_SHEET_NAME = st.secrets.get("LOG_SHEET_NAME", "Log")
 VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
 
-# Tối thiểu 2 tiết x 50 phút trước khi được ra ca
-MIN_OUT_MINUTES = int(st.secrets.get("MIN_OUT_MINUTES", 100))
+# Mỗi tiết 50 phút; nếu trên 3 tiết thì cộng 15 phút nghỉ giải lao sau tiết 3.
+LESSON_MINUTES = int(st.secrets.get("LESSON_MINUTES", 50))
+BREAK_AFTER_LESSONS = int(st.secrets.get("BREAK_AFTER_LESSONS", 3))
+BREAK_MINUTES = int(st.secrets.get("BREAK_MINUTES", 15))
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -43,7 +45,7 @@ SCOPES = [
 ]
 
 STAFF_COLUMNS = ["MSGV", "Họ và tên", "Đơn vị", "Bộ môn"]
-LOG_COLUMNS = ["Ngày", "MSGV", "Họ và tên", "Đơn vị", "Bộ môn", "CS", "Ca", "IN/OUT", "Giờ", "Timestamp"]
+LOG_COLUMNS = ["Ngày", "MSGV", "Họ và tên", "Đơn vị", "Bộ môn", "CS", "Ca", "Số tiết", "IN/OUT", "Giờ", "Timestamp"]
 
 LOCATIONS = {
     "Cơ sở 1: 217 Hồng Bàng": {
@@ -275,6 +277,30 @@ def minutes_since_time(t_obj):
     return (now - start).total_seconds() / 60
 
 
+def required_minutes_for_lessons(num_lessons):
+    """
+    Tính số phút tối thiểu từ lúc vào ca đến khi được ra ca.
+    1 tiết = 50 phút.
+    Nếu số tiết > 3, cộng 15 phút nghỉ giải lao sau tiết thứ 3.
+    Ví dụ:
+    1 tiết = 50 phút
+    2 tiết = 100 phút
+    3 tiết = 150 phút
+    4 tiết = 215 phút
+    5 tiết = 265 phút
+    """
+    try:
+        n = int(num_lessons)
+    except Exception:
+        n = 1
+
+    n = max(1, min(5, n))
+    total = n * LESSON_MINUTES
+    if n > BREAK_AFTER_LESSONS:
+        total += BREAK_MINUTES
+    return total
+
+
 def time_str():
     return now_vn().strftime("%H:%M:%S")
 
@@ -489,8 +515,6 @@ def find_staff_by_msgv(msgv_full):
     dept_i = col_index(["Bộ môn", "Bo mon"], 3)
 
     target_full = norm_digits(msgv_full)
-    target_last4 = target_full[-4:]
-
     for row in values[1:]:
         raw = row[msgv_i] if msgv_i < len(row) else ""
         raw_digits = norm_digits(raw)
@@ -498,7 +522,7 @@ def find_staff_by_msgv(msgv_full):
             continue
 
         raw_padded = raw_digits.zfill(len(target_full))
-        if raw_digits == target_full or raw_padded == target_full or raw_digits.endswith(target_last4):
+        if raw_digits == target_full or raw_padded == target_full:
             return {
                 "MSGV": msgv_full,
                 "Họ và tên": row[name_i] if name_i < len(row) else "",
@@ -521,10 +545,9 @@ def logs_for_msgv_today(msgv_full):
     Lấy log trong ngày của một MSGV.
     So khớp theo:
     - ngày ở dạng dd/mm/yyyy hoặc yyyy-mm-dd
-    - MSGV đủ mã hoặc 4 số cuối
+    - MSGV đủ mã hoặc 8 số
     """
     target = norm_digits(msgv_full)
-    target_last4 = target[-4:]
     result = []
 
     for r in load_logs():
@@ -534,7 +557,7 @@ def logs_for_msgv_today(msgv_full):
             continue
 
         same_day = row_date == today_str()
-        same_msgv = row_msgv == target or row_msgv.zfill(len(target)) == target or row_msgv.endswith(target_last4)
+        same_msgv = row_msgv == target or row_msgv.zfill(len(target)) == target
 
         if same_day and same_msgv:
             result.append(r)
@@ -543,10 +566,26 @@ def logs_for_msgv_today(msgv_full):
 
 
 def append_log(row):
+    """
+    Ghi Log bằng append_row và tự retry để giảm lỗi khi nhiều GV điểm danh cùng lúc.
+    Với quy mô khoảng 60 GV vào/ra ca cùng thời điểm, cơ chế này phù hợp hơn ghi từng ô.
+    """
     ws = log_ws()
     headers = ensure_header(ws, LOG_COLUMNS)
     values = [row.get(h, "") for h in headers]
-    _google_api_retry(lambda: ws.append_row(values, value_input_option="USER_ENTERED"))
+
+    last_error = None
+    for attempt in range(5):
+        try:
+            return ws.append_row(values, value_input_option="USER_ENTERED")
+        except Exception as e:
+            last_error = e
+            msg = str(e)
+            transient = any(code in msg for code in ["[500]", "[503]", "[429]", "Internal error", "Quota", "timeout", "Timeout"])
+            if not transient and attempt >= 1:
+                raise
+            time.sleep(0.7 * (attempt + 1))
+    raise last_error
 
 
 def summarize_hours(records):
@@ -594,7 +633,7 @@ def render_location_check(campus_code):
         st.error("Ứng dụng chưa cài đủ thư viện kiểm tra vị trí.")
         st.stop()
 
-    st.caption("Cho phép truy cập vị trí để xác thực điểm danh.")
+    st.caption("Cho phép truy cập vị trí để xác thực điểm danh trong phạm vi 100m.")
     loc = streamlit_geolocation()
     if not loc:
         st.warning("Chưa nhận được vị trí. Vui lòng bật định vị và cho phép truy cập vị trí.")
@@ -633,16 +672,28 @@ def render_gv_attendance():
     action_label = st.radio("Chọn loại điểm danh", ["Vào ca", "Ra ca"], horizontal=True)
     action = "IN" if action_label == "Vào ca" else "OUT"
 
-    suffix = st.text_input("4 số cuối MSGV", placeholder="VD: 1234", max_chars=4)
-    if suffix.strip().isdigit() and len(suffix.strip()) == 4:
-        st.caption(f"MSGV: {MSGV_PREFIX}{suffix.strip().zfill(4)}")
+    so_tiet = st.number_input(
+        "Số tiết trong ca",
+        min_value=1,
+        max_value=5,
+        value=2,
+        step=1,
+        help="Mỗi tiết 50 phút. Nếu trên 3 tiết, hệ thống cộng 15 phút nghỉ giải lao sau tiết 3.",
+    )
+
+    required_minutes = required_minutes_for_lessons(so_tiet)
+    st.caption(f"Thời gian tối thiểu trong ca: {required_minutes} phút.")
+
+    msgv_input = st.text_input("MSGV", placeholder="Nhập đủ 8 số MSGV", max_chars=8)
+    if msgv_input.strip().isdigit() and len(msgv_input.strip()) == 8:
+        st.caption(f"MSGV: {msgv_input.strip()}")
 
     if st.button("Xác nhận điểm danh", type="primary", use_container_width=True):
-        if not suffix.strip().isdigit() or len(suffix.strip()) != 4:
-            st.warning("Vui lòng nhập đúng 4 số cuối MSGV.")
+        if not msgv_input.strip().isdigit() or len(msgv_input.strip()) != 8:
+            st.warning("Vui lòng nhập đúng 8 số MSGV.")
             st.stop()
 
-        msgv_full = f"{MSGV_PREFIX}{suffix.strip().zfill(4)}"
+        msgv_full = msgv_input.strip()
         staff = find_staff_by_msgv(msgv_full)
 
         if not staff:
@@ -677,12 +728,22 @@ def render_gv_attendance():
                 st.warning("Không đọc được giờ vào ca. Vui lòng liên hệ quản trị để kiểm tra dữ liệu Log.")
                 st.stop()
 
+            # Ưu tiên số tiết đã ghi ở lần Vào ca; nếu log cũ chưa có thì dùng số tiết đang nhập.
+            lessons_from_log = safe_str(open_in.get("Số tiết"))
+            if lessons_from_log.isdigit():
+                lessons_required = int(lessons_from_log)
+            else:
+                lessons_required = int(so_tiet)
+
+            required_minutes_out = required_minutes_for_lessons(lessons_required)
             elapsed_minutes = minutes_since_time(parsed)
-            if elapsed_minutes < MIN_OUT_MINUTES:
-                remain = int(MIN_OUT_MINUTES - elapsed_minutes + 0.999)
+
+            if elapsed_minutes < required_minutes_out:
+                remain = int(required_minutes_out - elapsed_minutes + 0.999)
                 st.warning(
                     f"Chưa đủ thời gian tối thiểu để ra ca. "
-                    f"Cần đủ {MIN_OUT_MINUTES} phút kể từ lúc vào ca; còn khoảng {remain} phút."
+                    f"Ca này có {lessons_required} tiết, cần đủ {required_minutes_out} phút kể từ lúc vào ca; "
+                    f"còn khoảng {remain} phút."
                 )
                 st.stop()
 
@@ -695,6 +756,7 @@ def render_gv_attendance():
             "Bộ môn": staff.get("Bộ môn", ""),
             "CS": campus_code,
             "Ca": shift,
+            "Số tiết": int(so_tiet),
             "IN/OUT": action,
             "Giờ": t,
             "Timestamp": timestamp_str(),
@@ -709,6 +771,7 @@ def render_gv_attendance():
         st.success(f"{action_label} thành công!")
         st.write(f"MSGV: **{msgv_full}**")
         st.write(f"Ca: **{shift}**")
+        st.write(f"Số tiết: **{int(so_tiet)}**")
         st.write(f"Giờ: **{t}**")
         st.write(f"Cơ sở: **{campus_code}**")
 
@@ -731,11 +794,11 @@ def render_tab_qr():
 
 def render_tab_search():
     st.subheader("Tìm kiếm giảng viên")
-    q = st.text_input("Nhập 4 số cuối MSGV hoặc họ tên")
+    q = st.text_input("Nhập MSGV hoặc họ tên")
     if st.button("Tìm", use_container_width=True):
         rows = get_all_records_by_header(staff_ws())
-        if q.isdigit() and len(q) == 4:
-            rows = [r for r in rows if norm_digits(r.get("MSGV")).endswith(q)]
+        if q.isdigit():
+            rows = [r for r in rows if norm_digits(r.get("MSGV")) == q or norm_digits(r.get("MSGV")).zfill(len(q)) == q]
         else:
             rows = [r for r in rows if norm_search(q) in norm_search(r.get("Họ và tên"))]
         if rows:
@@ -829,6 +892,8 @@ def render_tab_setup():
     st.write("Sheet danh sách:", sw.title)
     st.write("Sheet log:", lw.title)
     st.write("Cột log:", LOG_COLUMNS)
+    st.info("Ghi Log sử dụng append_row kèm retry nhiều lần để giảm lỗi khi nhiều giảng viên điểm danh cùng thời điểm.")
+    st.info("Quy định ra ca: mỗi tiết 50 phút; nếu trên 3 tiết thì cộng thêm 15 phút nghỉ giải lao sau tiết 3.")
 
 
 # ===================== ĐIỀU HƯỚNG =====================
